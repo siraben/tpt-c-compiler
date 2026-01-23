@@ -68,7 +68,31 @@ tptasm("path/to/output.asm")
 Your compiled program should now be stored in the R3's memory. By turning decorations off, you can view the encoded FILT representation of your program. Now you can spark the start button (the rightmost button on the computer) and have it execute your program.
 
   
-  
+## Haskell End-to-End (Haskell -> C -> ASM -> R3)
+
+Build the Haskell compiler wrapper (separate from the original compiler path):
+
+```bash
+cd compiler
+./methodically < party_tpt.hs > party_tpt.c
+cc -O2 party_tpt.c -o party_tpt
+cd ..
+```
+
+Compile a Haskell source file to C, then to ASM (use 4096 words for Haskell runtimes):
+
+```bash
+python3 hscompile.py examples/hello.hs
+lua cli.lua examples/hello.c --size 4096 --output examples/hello.asm
+```
+
+Load the resulting ASM into the R3 with TPTASM as usual:
+
+```bash
+tptasm("path/to/examples/hello.asm")
+```
+
+
 
 #### If you encounter any problems during the compilation process, make sure to reach out to me on [TPT's discord](https://powdertoy.co.uk/Discussions/Thread/View.html?Thread=25871) where I have the username lithium404.
 
@@ -180,4 +204,3 @@ Displays a null-terminated array of characters.
   - `str` — Pointer to a character array.
 - **Returns**
   - `void`
-
