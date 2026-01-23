@@ -1,7 +1,13 @@
 -- Factorial for TPT R3
 infixr 9 .;
+infixl 7 * , /;
+infixl 6 + , -;
+infixr 5 ++;
+infix 4 ==;
 infixl 1 >>;
 infixr 0 $;
+
+data Bool = True | False;
 
 ($) f x = f x;
 (.) f g x = f (g x);
@@ -10,6 +16,12 @@ flst xs n c = case xs of { [] -> n; (:) h t -> c h t };
 class Functor f where { fmap :: (a -> b) -> f a -> f b };
 class Applicative f where { pure :: a -> f a; (<*>) :: f (a -> b) -> f a -> f b };
 class Monad m where { return :: a -> m a; (>>=) :: m a -> (a -> m b) -> m b };
+class Eq a where { (==) :: a -> a -> Bool };
+instance Eq Int where { (==) = intEq };
+(+) = intAdd;
+(-) = intSub;
+(*) = intMul;
+(/) = intDiv;
 
 foreign import ccall "putchar" putChar :: Int -> IO Int;
 
