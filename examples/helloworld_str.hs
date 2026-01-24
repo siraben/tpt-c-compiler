@@ -22,4 +22,4 @@ instance Functor IO where { fmap f x = ioPure f <*> x };
 mapM_ f xs = case xs of { [] -> pure (); (:) h t -> f h >> mapM_ f t };
 putStr s = mapM_ putChar s;
 
-main = putStr "Hello world\n";
+main = putStr "Hello from\n Haskell!";
