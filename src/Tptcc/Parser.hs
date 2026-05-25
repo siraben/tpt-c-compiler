@@ -4,22 +4,26 @@ module Tptcc.Parser
 
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, modify')
 import qualified Data.Set as Set
+import Data.Void (Void)
+import qualified Text.Megaparsec as MP
 
 import Tptcc.Ast
 import Tptcc.Token
 
 data ParserState = ParserState
-  { parserTokens :: [Token]
-  , parserTypedefs :: Set.Set String
+  { parserTypedefs :: Set.Set String
   }
   deriving (Eq, Show)
 
-type ParserM = StateT ParserState (Either String)
+type ParserM = StateT ParserState (MP.Parsec Void [Token])
 
 parse :: [Token] -> Either String Node
-parse tokens = fst <$> runStateT parseProgram ParserState {parserTokens = tokens, parserTypedefs = Set.empty}
+parse tokens =
+  case MP.runParser (evalStateT parseProgram ParserState {parserTypedefs = Set.empty}) "<tokens>" tokens of
+    Left err -> Left (show err)
+    Right ast -> Right ast
 
 parseProgram :: ParserM Node
 parseProgram = do
@@ -1067,17 +1071,10 @@ manyUntil end parser = do
       pure (item : rest)
 
 peekToken :: ParserM Token
-peekToken = do
-  state <- get
-  case parserTokens state of
-    token : _ -> pure token
-    [] -> lift (Left "Unexpected end of token stream")
+peekToken = lift (MP.lookAhead MP.anySingle)
 
 nextToken :: ParserM Token
-nextToken = do
-  token <- peekToken
-  modify' (\state -> state {parserTokens = drop 1 (parserTokens state)})
-  pure token
+nextToken = lift MP.anySingle
 
 check :: String -> ParserM Bool
 check expected = do
@@ -1091,8 +1088,8 @@ anyCheck names = do
 
 checkAt :: Int -> String -> ParserM Bool
 checkAt offset expected = do
-  state <- get
-  case drop offset (parserTokens state) of
+  tokens <- lift MP.getInput
+  case drop offset tokens of
     token : _ -> pure (effectiveTokenName token == expected)
     [] -> pure False
 
@@ -1217,16 +1214,14 @@ failAtPeek message = peekToken >>= \token -> failAt token message
 
 failAt :: Token -> String -> ParserM a
 failAt token message =
-  lift $
-    Left
-      ( message
-          <> " at "
-          <> show (row (tokenPos token))
-          <> ":"
-          <> show (col (tokenPos token))
-          <> " near "
-          <> show (tokenString token)
-      )
+  lift . fail $
+    message
+      <> " at "
+      <> show (row (tokenPos token))
+      <> ":"
+      <> show (col (tokenPos token))
+      <> " near "
+      <> show (tokenString token)
 
 listToMaybe :: [a] -> Maybe a
 listToMaybe [] = Nothing

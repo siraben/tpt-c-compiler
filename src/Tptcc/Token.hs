@@ -8,12 +8,12 @@ data SourcePos = SourcePos
   { row :: !Int
   , col :: !Int
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data TokenValue
   = ValueString String
   | ValueInt Integer
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data Token = Token
   { tokenTypeId :: !Int
@@ -21,4 +21,4 @@ data Token = Token
   , tokenValue :: TokenValue
   , tokenPos :: SourcePos
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
