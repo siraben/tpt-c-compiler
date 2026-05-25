@@ -1,0 +1,32 @@
+cabal-version: 3.0
+name: tpt-c-compiler-hs
+version: 0.1.0.0
+license: MIT
+license-file: LICENSE
+author: tpt-c-compiler contributors
+build-type: Simple
+extra-source-files:
+  README.md
+
+executable tptcc-hs
+  main-is: Main.hs
+  hs-source-dirs: src
+  other-modules:
+    Tptcc.Ast
+    Tptcc.CodeGen
+    Tptcc.CType
+    Tptcc.IRGlobal
+    Tptcc.IRSimpleTac
+    Tptcc.Lexer
+    Tptcc.Operand
+    Tptcc.Parser
+    Tptcc.SymbolTable
+    Tptcc.Token
+    Tptcc.TypeChecker
+  build-depends:
+    base >=4.16 && <5,
+    containers,
+    filepath,
+    transformers
+  default-language: Haskell2010
+  ghc-options: -Wall -Wcompat -O2
