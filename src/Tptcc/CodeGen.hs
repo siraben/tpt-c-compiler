@@ -283,15 +283,14 @@ renderMethod options optimized method =
     <> methodOutputName method
     <> ":\n"
     <> localAllocation
-    <> "\tpush base_pointer\n"
-    <> "\tmov base_pointer, stack_pointer\n"
-    <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") usedRegisters
+    <> frameSetup
+    <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
     <> concatMap (renderInstr options localSize) lowered
     <> ".exit_"
     <> methodOutputName method
     <> ":\n"
-    <> concatMap (\reg -> "\tpop r" <> show reg <> "\n") (reverse usedRegisters)
-    <> "\tpop base_pointer\n"
+    <> concatMap (\reg -> "\tpop r" <> show reg <> "\n") (reverse savedRegisters)
+    <> frameTeardown
     <> localRelease
     <> if methodOutputName method == "main"
       then "\thlt\n"
@@ -305,8 +304,18 @@ renderMethod options optimized method =
         else (abstractLowered, [])
     lowered =
       if optimized
-        then peephole options allocated
+        then optimizeMethodTail method (peephole options allocated)
         else allocated
+    savedRegisters
+      | methodOutputName method == "main" = []
+      | otherwise = usedRegisters
+    needsFrame = not optimized || localSize > 0 || any instrTouchesFrame lowered
+    frameSetup
+      | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
+      | otherwise = ""
+    frameTeardown
+      | needsFrame = "\tpop base_pointer\n"
+      | otherwise = ""
     localAllocation
       | localSize > 0 = "\tsub stack_pointer, " <> show localSize <> "\n"
       | otherwise = ""
@@ -618,6 +627,10 @@ peephole options instrs =
   where
     step c acc@(nc : rest)
       | instrType c == "mov" && fieldPlace "source" c == fieldPlace "dest" c = acc
+      | instrType c == "st" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc =
+          if fieldPlace "source" c == fieldPlace "dest" nc
+            then c : rest
+            else c : Instr "mov" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
       | instrType c == "add3" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
           Instr "ldoffset" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "offset" c)] [] : rest
       | instrType c == "mov" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
@@ -640,6 +653,41 @@ peephole options instrs =
     cmpImmediate opts place
       | placeType place == "g" = Place "i" (show (codeGenGlobalAddr opts + placeInteger place))
       | otherwise = place
+
+optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
+optimizeMethodTail method =
+  removeReturnRoundTrip . stripTrailingExitJump
+  where
+    exitTarget = Place "i" (".exit_" <> methodOutputName method)
+
+    stripTrailingExitJump instrs =
+      case reverse instrs of
+        instr : rest
+          | instrType instr == "jmp"
+              && fieldPlace "target" instr == exitTarget ->
+              reverse rest
+        _ -> instrs
+
+removeReturnRoundTrip :: [Instr] -> [Instr]
+removeReturnRoundTrip instrs =
+  case reverse instrs of
+    restore : save : rest
+      | instrType save == "mov"
+          && instrType restore == "mov"
+          && fieldPlace "source" save == Place "r" "return_reg"
+          && fieldPlace "dest" save == fieldPlace "source" restore
+          && fieldPlace "dest" restore == Place "r" "return_reg" ->
+          reverse rest
+    _ -> instrs
+
+instrTouchesFrame :: Instr -> Bool
+instrTouchesFrame instr =
+  any placeTouchesFrame (map snd (instrFields instr))
+
+placeTouchesFrame :: Place -> Bool
+placeTouchesFrame place =
+  placeType place `elem` ["l", "p"]
+    || place == Place "r" "base_pointer"
 
 renderInstr :: CodeGenOptions -> Integer -> Instr -> String
 renderInstr options localSize instr =
