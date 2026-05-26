@@ -6,7 +6,8 @@ module Tptcc.CodeGen
   , dumpNativeAsmOptimizedWithOptions
   ) where
 
-import Data.List (sortBy)
+import Control.Monad (foldM)
+import Data.List (find, sortBy)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -61,15 +62,18 @@ renderCheckedProgram options optimized program globalInfo stdlib
           <> show (tacProgramGlobalSize program)
           <> " /= "
           <> show (globalInfoSize globalInfo)
-  | otherwise = Right (renderProgram options optimized program globalInfo stdlib)
+  | otherwise = renderProgram options optimized program globalInfo stdlib
 
-renderProgram :: CodeGenOptions -> Bool -> TacProgram -> GlobalInfo -> [String] -> String
-renderProgram options optimized program globalInfo stdlib =
-  header options globalInfo
-    <> renderGlobalInstructions options optimized (tacProgramGlobalInstructions program)
-    <> entryJump
-    <> concatMap (renderMethod options optimized) (tacProgramMethods program)
-    <> renderStandardLibrary stdlib
+renderProgram :: CodeGenOptions -> Bool -> TacProgram -> GlobalInfo -> [String] -> Either String String
+renderProgram options optimized program globalInfo stdlib = do
+  globalAsm <- renderGlobalInstructions options optimized (tacProgramGlobalInstructions program)
+  methodAsm <- mapM (renderMethod options optimized) (tacProgramMethods program)
+  pure $
+    header options globalInfo
+      <> globalAsm
+      <> entryJump
+      <> concat methodAsm
+      <> renderStandardLibrary stdlib
   where
     entryJump
       | any ((== "main") . methodOutputName) (tacProgramMethods program) = "\tjmp __tptcc_fn_main\n"
@@ -163,19 +167,17 @@ commaSep [] = ""
 commaSep [value] = value
 commaSep (value : values) = value <> ", " <> commaSep values
 
-renderGlobalInstructions :: CodeGenOptions -> Bool -> [Instr] -> String
-renderGlobalInstructions options optimized instructions =
-  concatMap (renderInstr options 0) lowered
+renderGlobalInstructions :: CodeGenOptions -> Bool -> [Instr] -> Either String String
+renderGlobalInstructions options optimized instructions = do
+  lowered <-
+    if optimized
+      then do
+        (allocated, _) <- allocateRegisters abstractLowered
+        pure (peephole options allocated)
+      else pure abstractLowered
+  pure (concatMap (renderInstr options 0) lowered)
   where
     abstractLowered = map (lowerAbstract options 0) instructions
-    (allocated, _) =
-      if optimized
-        then allocateRegisters abstractLowered
-        else (abstractLowered, [])
-    lowered =
-      if optimized
-        then peephole options allocated
-        else allocated
 
 renderStandardLibrary :: [String] -> String
 renderStandardLibrary names =
@@ -277,51 +279,53 @@ standardLibraryCode =
       )
     ]
 
-renderMethod :: CodeGenOptions -> Bool -> MethodOutput -> String
-renderMethod options optimized method =
-  "__tptcc_fn_"
-    <> methodOutputName method
-    <> ":\n"
-    <> localAllocation
-    <> frameSetup
-    <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
-    <> concatMap (renderInstr options localSize) lowered
-    <> ".exit_"
-    <> methodOutputName method
-    <> ":\n"
-    <> concatMap (\reg -> "\tpop r" <> show reg <> "\n") (reverse savedRegisters)
-    <> frameTeardown
-    <> localRelease
-    <> if methodOutputName method == "main"
-      then "\thlt\n"
-      else "\tret\n"
+renderMethod :: CodeGenOptions -> Bool -> MethodOutput -> Either String String
+renderMethod options optimized method = do
+  (allocated, _) <-
+    if optimized
+      then allocateRegisters abstractLowered
+      else pure (abstractLowered, [])
+  let lowered =
+        if optimized
+          then optimizeMethodTail method (peephole options allocated)
+          else allocated
+      usedRegisters = usedAllocatedRegisters lowered
+      savedRegisters
+        | methodOutputName method == "main" = []
+        | otherwise = usedRegisters
+      needsFrame = not optimized || localSize > 0 || any instrTouchesFrame lowered
+      frameSetup
+        | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
+        | otherwise = ""
+      frameTeardown
+        | needsFrame = "\tpop base_pointer\n"
+        | otherwise = ""
+      localAllocation
+        | localSize > 0 = "\tsub stack_pointer, " <> show localSize <> "\n"
+        | otherwise = ""
+      localRelease
+        | localSize > 0 = "\tadd stack_pointer, " <> show localSize <> "\n"
+        | otherwise = ""
+  pure $
+    "__tptcc_fn_"
+      <> methodOutputName method
+      <> ":\n"
+      <> localAllocation
+      <> frameSetup
+      <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
+      <> concatMap (renderInstr options localSize) lowered
+      <> ".exit_"
+      <> methodOutputName method
+      <> ":\n"
+      <> concatMap (\reg -> "\tpop r" <> show reg <> "\n") (reverse savedRegisters)
+      <> frameTeardown
+      <> localRelease
+      <> if methodOutputName method == "main"
+        then "\thlt\n"
+        else "\tret\n"
   where
     localSize = methodOutputLocalSize method
     abstractLowered = map (lowerAbstract options localSize) (methodOutputInstructions method)
-    (allocated, usedRegisters) =
-      if optimized
-        then allocateRegisters abstractLowered
-        else (abstractLowered, [])
-    lowered =
-      if optimized
-        then optimizeMethodTail method (peephole options allocated)
-        else allocated
-    savedRegisters
-      | methodOutputName method == "main" = []
-      | otherwise = usedRegisters
-    needsFrame = not optimized || localSize > 0 || any instrTouchesFrame lowered
-    frameSetup
-      | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
-      | otherwise = ""
-    frameTeardown
-      | needsFrame = "\tpop base_pointer\n"
-      | otherwise = ""
-    localAllocation
-      | localSize > 0 = "\tsub stack_pointer, " <> show localSize <> "\n"
-      | otherwise = ""
-    localRelease
-      | localSize > 0 = "\tadd stack_pointer, " <> show localSize <> "\n"
-      | otherwise = ""
 
 lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
 lowerAbstract options localSize instr
@@ -371,7 +375,7 @@ emptyBlock ident predIds succIds =
     , blockPerOut = []
     }
 
-allocateRegisters :: [Instr] -> ([Instr], [Integer])
+allocateRegisters :: [Instr] -> Either String ([Instr], [Integer])
 allocateRegisters tac =
   let blocks0 = buildBasicBlocks tac
       blocks1 = map buildBlockUseDef blocks0
@@ -380,10 +384,11 @@ allocateRegisters tac =
       blocks3 = map computePerInstructionLiveness ordered
       graph = buildInterferenceGraph blocks3
       colourOrder = luaIntegerPairsOrder (Map.keys graph)
-      colours = colourGraph colourOrder graph
-      rewritten = map (rewriteInstrRegisters colours) tac
-      used = uniqueInOrder [colours Map.! reg | reg <- colourOrder, Map.member reg colours]
-   in (rewritten, used)
+   in do
+        colours <- colourGraph colourOrder graph
+        let rewritten = map (rewriteInstrRegisters colours) tac
+            used = uniqueInOrder [colours Map.! reg | reg <- colourOrder, Map.member reg colours]
+        pure (rewritten, used)
 
 buildBasicBlocks :: [Instr] -> [BasicBlock]
 buildBasicBlocks tac = finalBlocks
@@ -521,14 +526,19 @@ buildInterferenceGraph blocks =
       Map.insertWith Set.union b (Set.singleton a) $
         Map.insertWith Set.union a (Set.singleton b) graph
 
-colourGraph :: [Integer] -> Map.Map Integer (Set.Set Integer) -> Map.Map Integer Integer
+colourGraph :: [Integer] -> Map.Map Integer (Set.Set Integer) -> Either String (Map.Map Integer Integer)
 colourGraph order graph =
-  foldl' colourOne Map.empty order
+  foldM colourOne Map.empty order
   where
     colourOne mapping reg =
       let usedColours = Set.fromList [usedColour | neighbour <- Set.toList (Map.findWithDefault Set.empty reg graph), Just usedColour <- [Map.lookup neighbour mapping]]
-          chosenColour = firstAvailableColour usedColours 1
-       in Map.insert reg chosenColour mapping
+       in case firstAvailableColour usedColours of
+            Just chosenColour -> pure (Map.insert reg chosenColour mapping)
+            Nothing ->
+              Left $
+                "register allocation exhausted for virtual register "
+                  <> show reg
+                  <> ": all allocatable registers r1-r21 are live"
 
 luaIntegerPairsOrder :: [Integer] -> [Integer]
 luaIntegerPairsOrder keys =
@@ -571,10 +581,29 @@ uniqueInOrder = go Set.empty
       | Set.member value seen = go seen rest
       | otherwise = value : go (Set.insert value seen) rest
 
-firstAvailableColour :: Set.Set Integer -> Integer -> Integer
-firstAvailableColour used candidate
-  | Set.member candidate used = firstAvailableColour used (candidate + 1)
-  | otherwise = candidate
+allocatableRegisters :: [Integer]
+allocatableRegisters = [1 .. 21]
+
+firstAvailableColour :: Set.Set Integer -> Maybe Integer
+firstAvailableColour used =
+  find (`Set.notMember` used) allocatableRegisters
+
+usedAllocatedRegisters :: [Instr] -> [Integer]
+usedAllocatedRegisters instrs =
+  uniqueInOrder
+    [ reg
+    | instr <- instrs
+    , (_, place) <- instrFields instr
+    , Just reg <- [allocatedPhysicalRegister place]
+    ]
+
+allocatedPhysicalRegister :: Place -> Maybe Integer
+allocatedPhysicalRegister place
+  | placeType place == "r" =
+      case reads (placeValue place) of
+        [(reg, "")] | reg `elem` allocatableRegisters -> Just reg
+        _ -> Nothing
+  | otherwise = Nothing
 
 rewriteInstrRegisters :: Map.Map Integer Integer -> Instr -> Instr
 rewriteInstrRegisters colours instr =
