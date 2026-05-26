@@ -3,7 +3,7 @@ module Tptcc.Lexer
   ) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, toLower, toUpper)
-import Data.List (isPrefixOf)
+import qualified Data.Map.Strict as Map
 import Numeric (readHex)
 
 import Tptcc.Token
@@ -21,10 +21,8 @@ lexC input = go 1 1 input
 nextToken :: Int -> Int -> String -> (Token, Int, Int, String)
 nextToken line column source =
   firstMatch
-    [ reserved
-    , storageClass
+    [ storageClass
     , operator
-    , typeSpecifier
     , identifier
     , stringLiteral
     , characterLiteral
@@ -42,44 +40,12 @@ nextToken line column source =
 
 type Scanner = Int -> Int -> String -> Maybe (Token, Int, Int, String)
 
-reserved :: Scanner
-reserved line column source =
-  keywordToken
-    [ "if"
-    , "else"
-    , "for"
-    , "while"
-    , "return"
-    , "break"
-    , "continue"
-    , "switch"
-    , "case"
-    , "default"
-    , "asm"
-    ]
-    (\word -> map toUpper word)
-    isIdentContinue
-    line
-    column
-    source
-
 storageClass :: Scanner
-storageClass line column source =
-  keywordToken ["auto", "register", "static", "typedef"] (const "STORAGE_CLASS") isAlphaNum line column source
+storageClass = keywordPrefixToken ["auto", "register", "static", "typedef"] (const "STORAGE_CLASS") isAlphaNum
 
-typeSpecifier :: Scanner
-typeSpecifier line column source =
-  keywordToken
-    ["int", "char", "void", "long", "unsigned", "signed", "struct", "union", "enum"]
-    (const "TYPE_SPECIFIER")
-    isIdentContinue
-    line
-    column
-    source
-
-keywordToken :: [String] -> (String -> String) -> (Char -> Bool) -> Scanner
-keywordToken wordsToMatch nameOf continuation line column source =
-  case firstKeyword wordsToMatch source of
+keywordPrefixToken :: [String] -> (String -> String) -> (Char -> Bool) -> Scanner
+keywordPrefixToken wordsToMatch nameOf continuation line column source =
+  case firstPrefix wordsToMatch source of
     Just word
       | not (continues word) ->
           Just (mkToken (nameOf word) (ValueString word) line column, line, column + length word, drop (length word) source)
@@ -90,11 +56,12 @@ keywordToken wordsToMatch nameOf continuation line column source =
         next : _ -> continuation next
         [] -> False
 
-firstKeyword :: [String] -> String -> Maybe String
-firstKeyword [] _ = Nothing
-firstKeyword (word : wordsToMatch) source
-  | word `isPrefixOf` source = Just word
-  | otherwise = firstKeyword wordsToMatch source
+firstPrefix :: [String] -> String -> Maybe String
+firstPrefix [] _ = Nothing
+firstPrefix (word : wordsToMatch) source =
+  case splitAt (length word) source of
+    (prefix, _) | prefix == word -> Just word
+    _ -> firstPrefix wordsToMatch source
 
 operator :: Scanner
 operator line column source =
@@ -103,57 +70,48 @@ operator line column source =
     Nothing -> Nothing
 
 matchOperator :: String -> Maybe String
-matchOperator source = firstOp operatorPatterns
-  where
-    firstOp [] = Nothing
-    firstOp (op : ops)
-      | op == "<<" && "<<=" `isPrefixOf` source = firstOp ops
-      | op == ">>" && ">>=" `isPrefixOf` source = firstOp ops
-      | op `isPrefixOf` source = Just op
-      | otherwise = firstOp ops
-
-operatorPatterns :: [String]
-operatorPatterns =
-  [ "&&"
-  , "||"
-  , "=="
-  , "!="
-  , "<="
-  , ">="
-  , "++"
-  , "--"
-  , "->"
-  , "..."
-  , "<<"
-  , ">>"
-  , "sizeof"
-  , "+="
-  , "-="
-  , "*="
-  , "/="
-  , "%="
-  , "&="
-  , "|="
-  , "^="
-  , "<<="
-  , ">>="
-  , "+"
-  , "-"
-  , "*"
-  , "/"
-  , "%"
-  , "!"
-  , "<"
-  , "="
-  , ">"
-  , "&"
-  , "?"
-  , ":"
-  , "."
-  , "^"
-  , "|"
-  , "~"
-  ]
+matchOperator source =
+  case source of
+    '&' : '&' : _ -> Just "&&"
+    '&' : '=' : _ -> Just "&="
+    '&' : _ -> Just "&"
+    '|' : '|' : _ -> Just "||"
+    '|' : '=' : _ -> Just "|="
+    '|' : _ -> Just "|"
+    '=' : '=' : _ -> Just "=="
+    '=' : _ -> Just "="
+    '!' : '=' : _ -> Just "!="
+    '!' : _ -> Just "!"
+    '<' : '<' : '=' : _ -> Just "<<="
+    '<' : '<' : _ -> Just "<<"
+    '<' : '=' : _ -> Just "<="
+    '<' : _ -> Just "<"
+    '>' : '>' : '=' : _ -> Just ">>="
+    '>' : '>' : _ -> Just ">>"
+    '>' : '=' : _ -> Just ">="
+    '>' : _ -> Just ">"
+    '+' : '+' : _ -> Just "++"
+    '+' : '=' : _ -> Just "+="
+    '+' : _ -> Just "+"
+    '-' : '-' : _ -> Just "--"
+    '-' : '>' : _ -> Just "->"
+    '-' : '=' : _ -> Just "-="
+    '-' : _ -> Just "-"
+    '.' : '.' : '.' : _ -> Just "..."
+    '.' : _ -> Just "."
+    '*' : '=' : _ -> Just "*="
+    '*' : _ -> Just "*"
+    '/' : '=' : _ -> Just "/="
+    '/' : _ -> Just "/"
+    '%' : '=' : _ -> Just "%="
+    '%' : _ -> Just "%"
+    '^' : '=' : _ -> Just "^="
+    '^' : _ -> Just "^"
+    '?' : _ -> Just "?"
+    ':' : _ -> Just ":"
+    '~' : _ -> Just "~"
+    's' : 'i' : 'z' : 'e' : 'o' : 'f' : _ -> Just "sizeof"
+    _ -> Nothing
 
 identifier :: Scanner
 identifier line column source =
@@ -161,8 +119,38 @@ identifier line column source =
     c : _
       | isIdentStart c ->
           let ident = takeWhile isIdentContinue source
-           in Just (mkToken "ID" (ValueString ident) line column, line, column + length ident, drop (length ident) source)
+              name = Map.findWithDefault "ID" ident keywordTokenNames
+           in Just (mkToken name (ValueString ident) line column, line, column + length ident, drop (length ident) source)
     _ -> Nothing
+
+keywordTokenNames :: Map.Map String String
+keywordTokenNames =
+  Map.fromList
+    [ ("if", "IF")
+    , ("else", "ELSE")
+    , ("for", "FOR")
+    , ("while", "WHILE")
+    , ("return", "RETURN")
+    , ("break", "BREAK")
+    , ("continue", "CONTINUE")
+    , ("switch", "SWITCH")
+    , ("case", "CASE")
+    , ("default", "DEFAULT")
+    , ("asm", "ASM")
+    , ("auto", "STORAGE_CLASS")
+    , ("register", "STORAGE_CLASS")
+    , ("static", "STORAGE_CLASS")
+    , ("typedef", "STORAGE_CLASS")
+    , ("int", "TYPE_SPECIFIER")
+    , ("char", "TYPE_SPECIFIER")
+    , ("void", "TYPE_SPECIFIER")
+    , ("long", "TYPE_SPECIFIER")
+    , ("unsigned", "TYPE_SPECIFIER")
+    , ("signed", "TYPE_SPECIFIER")
+    , ("struct", "TYPE_SPECIFIER")
+    , ("union", "TYPE_SPECIFIER")
+    , ("enum", "TYPE_SPECIFIER")
+    ]
 
 stringLiteral :: Scanner
 stringLiteral line column source =
@@ -307,9 +295,12 @@ mkToken name value line column =
 
 tokenTypeIdFor :: String -> Int
 tokenTypeIdFor name =
-  case lookup name tokenTypes of
+  case Map.lookup name tokenTypeIds of
     Just typeId -> typeId
     Nothing -> error ("invalid token type: " ++ name)
+
+tokenTypeIds :: Map.Map String Int
+tokenTypeIds = Map.fromList tokenTypes
 
 tokenTypes :: [(String, Int)]
 tokenTypes =

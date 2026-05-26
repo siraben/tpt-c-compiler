@@ -379,61 +379,69 @@ allocateRegisters tac =
 buildBasicBlocks :: [Instr] -> [BasicBlock]
 buildBasicBlocks tac = finalBlocks
   where
-    step (currentId, blockMap, order) (index, instr)
+    step (currentId, blockMap, orderRev, orderLength) (index, instr)
       | instrType instr == "label" =
           let target = placeValue (fieldPlace "target" instr)
               blockMap1 = addSucc currentId target blockMap
-              (blockMap2, order2) =
+              (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, order)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 order
+                  then (addPred target currentId blockMap1, orderRev, orderLength)
+                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
               blockMap3 = Map.adjust (\b -> b {blockCode = [(index, instr)]}) target blockMap2
-           in (target, blockMap3, order2)
+           in (target, blockMap3, orderRev2, orderLength2)
       | instrType instr == "jmp" =
           let target = placeValue (fieldPlace "target" instr)
               blockMap1 = addSucc currentId target blockMap
-              (blockMap2, order2) =
+              (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, order)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 order
-              blockMap3 = appendCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> show (length order2)
-              (blockMap4, order3) = insertBlock (emptyBlock anonId [] []) blockMap3 order2
-           in (anonId, blockMap4, order3)
+                  then (addPred target currentId blockMap1, orderRev, orderLength)
+                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
+              blockMap3 = prependCode currentId (index, instr) blockMap2
+              anonId = "anon_block" <> show orderLength2
+              (blockMap4, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [] []) blockMap3 orderRev2 orderLength2
+           in (anonId, blockMap4, orderRev3, orderLength3)
       | isJumpInstruction (instrType instr) =
           let target = placeValue (fieldPlace "target" instr)
               blockMap1 = addSucc currentId target blockMap
-              (blockMap2, order2) =
+              (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, order)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 order
-              blockMap3 = appendCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> show (length order2)
+                  then (addPred target currentId blockMap1, orderRev, orderLength)
+                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
+              blockMap3 = prependCode currentId (index, instr) blockMap2
+              anonId = "anon_block" <> show orderLength2
               blockMap4 = addSucc currentId anonId blockMap3
-              (blockMap5, order3) = insertBlock (emptyBlock anonId [currentId] []) blockMap4 order2
-           in (anonId, blockMap5, order3)
+              (blockMap5, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [currentId] []) blockMap4 orderRev2 orderLength2
+           in (anonId, blockMap5, orderRev3, orderLength3)
       | otherwise =
-          (currentId, appendCode currentId (index, instr) blockMap, order)
+          (currentId, prependCode currentId (index, instr) blockMap, orderRev, orderLength)
 
-    finalBlocksFrom blockMap order = [blockMap Map.! ident | ident <- order]
-    finalBlocks = finalBlocksFrom finalMap finalOrder
-    (_, finalMap, finalOrder) = foldl' step ("!start", Map.fromList [("!start", emptyBlock "!start" [] [])], ["!start"]) (zip [1 ..] tac)
+    finalBlocksFrom blockMap orderRev = [normalizeBlock (blockMap Map.! ident) | ident <- reverse orderRev]
+    finalBlocks = finalBlocksFrom finalMap finalOrderRev
+    (_, finalMap, finalOrderRev, _) = foldl' step ("!start", Map.fromList [("!start", emptyBlock "!start" [] [])], ["!start"], 1) (zip [1 ..] tac)
 
-insertBlock :: BasicBlock -> Map.Map String BasicBlock -> [String] -> (Map.Map String BasicBlock, [String])
-insertBlock block blockMap order =
-  (Map.insert (blockId block) block blockMap, order <> [blockId block])
+normalizeBlock :: BasicBlock -> BasicBlock
+normalizeBlock block =
+  block
+    { blockCode = reverse (blockCode block)
+    , blockPred = reverse (blockPred block)
+    , blockSucc = reverse (blockSucc block)
+    }
 
-appendCode :: String -> (Int, Instr) -> Map.Map String BasicBlock -> Map.Map String BasicBlock
-appendCode ident code =
-  Map.adjust (\block -> block {blockCode = blockCode block <> [code]}) ident
+insertBlock :: BasicBlock -> Map.Map String BasicBlock -> [String] -> Int -> (Map.Map String BasicBlock, [String], Int)
+insertBlock block blockMap orderRev orderLength =
+  (Map.insert (blockId block) block blockMap, blockId block : orderRev, orderLength + 1)
+
+prependCode :: String -> (Int, Instr) -> Map.Map String BasicBlock -> Map.Map String BasicBlock
+prependCode ident code =
+  Map.adjust (\block -> block {blockCode = code : blockCode block}) ident
 
 addSucc :: String -> String -> Map.Map String BasicBlock -> Map.Map String BasicBlock
 addSucc ident succId =
-  Map.adjust (\block -> block {blockSucc = blockSucc block <> [succId]}) ident
+  Map.adjust (\block -> block {blockSucc = succId : blockSucc block}) ident
 
 addPred :: String -> String -> Map.Map String BasicBlock -> Map.Map String BasicBlock
 addPred ident predId =
-  Map.adjust (\block -> block {blockPred = blockPred block <> [predId]}) ident
+  Map.adjust (\block -> block {blockPred = predId : blockPred block}) ident
 
 isJumpInstruction :: String -> Bool
 isJumpInstruction ty = take 1 ty == "j"

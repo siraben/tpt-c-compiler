@@ -787,14 +787,14 @@ parseBinaryNode nodeName' operators subParser = do
     else pure firstOperand
 
 parseBinaryRest :: [String] -> ParserM Node -> [NodeChild] -> ParserM [NodeChild]
-parseBinaryRest operators subParser children = do
+parseBinaryRest operators subParser childrenRev = do
   hasOperator <- anyCheck operators
   if hasOperator
     then do
       opToken <- nextToken
       operand <- subParser
-      parseBinaryRest operators subParser (children <> [ChildToken opToken, ChildNode operand])
-    else pure children
+      parseBinaryRest operators subParser (ChildNode operand : ChildToken opToken : childrenRev)
+    else pure (reverse childrenRev)
 
 parseOperandOnlyNode :: String -> [String] -> ParserM Node -> ParserM Node
 parseOperandOnlyNode nodeName' operators subParser = do
@@ -808,14 +808,14 @@ parseOperandOnlyNode nodeName' operators subParser = do
     else pure firstOperand
 
 parseOperandOnlyRest :: [String] -> ParserM Node -> [Node] -> ParserM [Node]
-parseOperandOnlyRest operators subParser children = do
+parseOperandOnlyRest operators subParser childrenRev = do
   hasOperator <- anyCheck operators
   if hasOperator
     then do
       _ <- nextToken
       operand <- subParser
-      parseOperandOnlyRest operators subParser (children <> [operand])
-    else pure children
+      parseOperandOnlyRest operators subParser (operand : childrenRev)
+    else pure (reverse childrenRev)
 
 parseCastExpression :: ParserM Node
 parseCastExpression = do
@@ -1061,14 +1061,15 @@ emptyNodeAt name pos =
       }
 
 manyUntil :: String -> ParserM Node -> ParserM [Node]
-manyUntil end parser = do
-  done <- check end
-  if done
-    then pure []
-    else do
-      item <- parser
-      rest <- manyUntil end parser
-      pure (item : rest)
+manyUntil end parser = go []
+  where
+    go nodesRev = do
+      done <- check end
+      if done
+        then pure (reverse nodesRev)
+        else do
+          item <- parser
+          go (item : nodesRev)
 
 peekToken :: ParserM Token
 peekToken = lift (MP.lookAhead MP.anySingle)

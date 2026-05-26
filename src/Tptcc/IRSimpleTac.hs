@@ -11,7 +11,10 @@ module Tptcc.IRSimpleTac
 import Control.Monad (forM_, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
+import Data.Sequence (Seq, (><), (|>))
+import qualified Data.Sequence as Seq
 
 import Tptcc.Ast
 import Tptcc.CType (CType (..), TypeKind (..))
@@ -80,7 +83,7 @@ data TacState = TacState
   , enumConstants :: Map.Map String Place
   , globals :: Map.Map String LocalInfo
   , locals :: Map.Map String LocalInfo
-  , instructions :: [Instr]
+  , instructions :: Seq Instr
   , methods :: [MethodOutput]
   , breakpoints :: [Integer]
   , breakpointIndex :: Int
@@ -102,9 +105,9 @@ generateSimpleTacWithBreakpoints requestedBreakpoints ast = do
   (_, st) <- runStateT (emitProgram ast) (initialState requestedBreakpoints)
   pure
     TacProgram
-      { tacProgramMethods = methods st
+      { tacProgramMethods = reverse (methods st)
       , tacProgramGlobalSize = globalOffset st
-      , tacProgramGlobalInstructions = instructions st
+      , tacProgramGlobalInstructions = toList (instructions st)
       }
 
 initialState :: [Integer] -> TacState
@@ -122,7 +125,7 @@ initialState requestedBreakpoints =
     , enumConstants = Map.empty
     , globals = Map.empty
     , locals = Map.empty
-    , instructions = []
+    , instructions = Seq.empty
     , methods = []
     , breakpoints = requestedBreakpoints
     , breakpointIndex = 0
@@ -203,7 +206,7 @@ emitFunction (name, declaration, declarator) = do
           { currentMethodName = name
           , localOffset = 0
           , locals = Map.fromList params
-          , instructions = []
+          , instructions = Seq.empty
           , loopLabels = []
           , caseLabels = []
           }
@@ -213,13 +216,13 @@ emitFunction (name, declaration, declarator) = do
   let output =
         MethodOutput
           { methodOutputName = name
-          , methodOutputInstructions = instructions st
+          , methodOutputInstructions = toList (instructions st)
           , methodOutputLocalSize = localOffset st
           }
   modify'
     ( \s ->
         s
-          { methods = methods s <> [output]
+          { methods = output : methods s
           , currentMethodName = previousMethod
           , locals = previousLocals
           , localOffset = previousLocalOffset
@@ -390,7 +393,7 @@ emitSwitch :: Node -> TacM ()
 emitSwitch node = do
   condition <- fieldNode "condition" node >>= emitExpression >>= loadOperandIntoRegister
   endLabel <- nextLabel
-  mark <- length . instructions <$> get
+  mark <- Seq.length . instructions <$> get
   pushCaseLabels
   pushLoopLabels endLabel endLabel
   fieldNode "block" node >>= emitBlock
@@ -1239,7 +1242,7 @@ addCaseLabel value target =
     st
       { caseLabels =
           case caseLabels st of
-            context : rest -> context {caseEntries = caseEntries context <> [(value, target)]} : rest
+            context : rest -> context {caseEntries = (value, target) : caseEntries context} : rest
             [] -> []
       }
 
@@ -1259,22 +1262,22 @@ popCaseLabels = do
   case labels of
     context : rest -> do
       modify' (\st -> st {caseLabels = rest})
-      pure context
+      pure context {caseEntries = reverse (caseEntries context)}
     [] -> throw "case label stack underflow"
 
 emit :: String -> [(String, Place)] -> TacM ()
 emit ty fields =
-  modify' (\st -> st {instructions = instructions st <> [Instr ty fields []]})
+  modify' (\st -> st {instructions = instructions st |> Instr ty fields []})
 
 emitString :: String -> [(String, String)] -> TacM ()
 emitString ty fields =
-  modify' (\st -> st {instructions = instructions st <> [Instr ty [] fields]})
+  modify' (\st -> st {instructions = instructions st |> Instr ty [] fields})
 
 insertInstructionsAt :: Int -> [Instr] -> TacM ()
 insertInstructionsAt index inserted =
   modify' $ \st ->
-    let (prefix, suffix) = splitAt index (instructions st)
-     in st {instructions = prefix <> inserted <> suffix}
+    let (prefix, suffix) = Seq.splitAt index (instructions st)
+     in st {instructions = prefix >< Seq.fromList inserted >< suffix}
 
 renderTac :: TacProgram -> [String]
 renderTac program =
