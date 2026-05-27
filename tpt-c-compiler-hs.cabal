@@ -29,6 +29,7 @@ executable tptcc-hs
     containers,
     filepath,
     megaparsec,
+    prettyprinter,
     transformers
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat -O2

@@ -4,10 +4,12 @@ module Tptcc.SSA
   ) where
 
 import Control.Applicative ((<|>))
-import Data.List (intercalate, isSuffixOf, sort, sortBy)
+import Data.List (isSuffixOf, sort, sortBy)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.String as PPString
 
 import Tptcc.Ast (Node)
 import Tptcc.IRSimpleTac (Instr (..), MethodOutput (..), Place (..), TacProgram (..), generateSimpleTac)
@@ -72,11 +74,14 @@ data SSAPlace = SSAPlace
   deriving (Eq, Show)
 
 newtype Var = Var {varPlace :: Place}
-  deriving (Eq, Show)
+  deriving (Show)
+
+instance Eq Var where
+  left == right = compare left right == EQ
 
 instance Ord Var where
   compare (Var left) (Var right) =
-    compare (placeType left, placeValue left) (placeType right, placeValue right)
+    compare (ssaVariableKey left) (ssaVariableKey right)
 
 data RenameState = RenameState
   { renameCounters :: Map.Map Var Integer
@@ -86,6 +91,7 @@ data RenameState = RenameState
   deriving (Eq, Show)
 
 type SSAPlaceKey = (String, String, Integer)
+type EdgeCopies = Map.Map BlockId (Map.Map BlockId [Instr])
 
 dumpSSA :: Node -> Either String [String]
 dumpSSA ast = renderSSA . generateSSA <$> generateSimpleTac ast
@@ -103,11 +109,12 @@ methodToSSA = methodToSSAWith isSSAPlace
 
 methodToSSAWith :: (Place -> Bool) -> MethodOutput -> SSAMethod
 methodToSSAWith ssaPlacePredicate method =
-  SSAMethod
-    { ssaMethodName = methodOutputName method
-    , ssaMethodLocalSize = methodOutputLocalSize method
-    , ssaMethodBlocks = renamed
-    }
+  optimizeSSAMethod $
+    SSAMethod
+      { ssaMethodName = methodOutputName method
+      , ssaMethodLocalSize = methodOutputLocalSize method
+      , ssaMethodBlocks = renamed
+      }
   where
     rawBlocks = buildRawBlocks (methodOutputInstructions method)
     doms = dominators rawBlocks
@@ -511,6 +518,147 @@ popPlaces places st =
           places
     }
 
+optimizeSSAMethod :: SSAMethod -> SSAMethod
+optimizeSSAMethod = go (8 :: Int)
+  where
+    go 0 method = method
+    go fuel method =
+      let method' = propagateSSACopies (eliminateTrivialPhis method)
+       in if method' == method then method else go (fuel - 1) method'
+
+eliminateTrivialPhis :: SSAMethod -> SSAMethod
+eliminateTrivialPhis method =
+  removeReplacedPhis (applySSAReplacements replacements method)
+  where
+    replacements = trivialPhiReplacements method
+    replaced = Map.keysSet replacements
+    removeReplacedPhis =
+      mapSSABlocks $ \block ->
+        block
+          { ssaBlockPhis =
+              [ phi
+              | phi <- ssaBlockPhis block
+              , maybe True (`Set.notMember` replaced) (ssaReplacementKey (ssaPhiDest phi))
+              ]
+          }
+
+trivialPhiReplacements :: SSAMethod -> Map.Map SSAPlaceKey SSAPlace
+trivialPhiReplacements method =
+  Map.fromList
+    [ (destKey, replacement)
+    | block <- ssaMethodBlocks method
+    , phi <- ssaBlockPhis block
+    , Just destKey <- [ssaReplacementKey (ssaPhiDest phi)]
+    , replacement <- maybe [] pure (trivialPhiReplacement destKey phi)
+    ]
+
+trivialPhiReplacement :: SSAPlaceKey -> SSAPhi -> Maybe SSAPlace
+trivialPhiReplacement destKey phi =
+  case Set.toList uniqueInputs of
+    [replacement] -> Just (comparableSSAPlace replacement)
+    _ -> Nothing
+  where
+    uniqueInputs =
+      Set.fromList
+        [ ComparableSSAPlace input
+        | (_, input) <- ssaPhiInputs phi
+        , ssaReplacementKey input /= Just destKey
+        ]
+
+propagateSSACopies :: SSAMethod -> SSAMethod
+propagateSSACopies method =
+  removeCopyInstructions (applySSAReplacements replacements method)
+  where
+    replacements = copyReplacements method
+    replaced = Map.keysSet replacements
+    removeCopyInstructions =
+      mapSSABlocks $ \block ->
+        block
+          { ssaBlockCode =
+              [ (index, instr)
+              | (index, instr) <- ssaBlockCode block
+              , not (isRemovedCopy replaced instr)
+              ]
+          }
+
+copyReplacements :: SSAMethod -> Map.Map SSAPlaceKey SSAPlace
+copyReplacements method =
+  Map.fromList
+    [ (destKey, source)
+    | block <- ssaMethodBlocks method
+    , (_, instr) <- ssaBlockCode block
+    , ssaInstrType instr == "mov"
+    , Just source <- [lookup "source" (ssaInstrFields instr)]
+    , Just dest <- [lookup "dest" (ssaInstrFields instr)]
+    , Just _ <- [ssaReplacementKey source]
+    , Just destKey <- [ssaReplacementKey dest]
+    , source /= dest
+    ]
+
+isRemovedCopy :: Set.Set SSAPlaceKey -> SSAInstr -> Bool
+isRemovedCopy replaced instr =
+  ssaInstrType instr == "mov"
+    && maybe False (`Set.member` replaced) (lookup "dest" (ssaInstrFields instr) >>= ssaReplacementKey)
+
+applySSAReplacements :: Map.Map SSAPlaceKey SSAPlace -> SSAMethod -> SSAMethod
+applySSAReplacements replacements =
+  mapSSABlocks rewriteBlock
+  where
+    rewriteBlock block =
+      block
+        { ssaBlockPhis = map rewritePhi (ssaBlockPhis block)
+        , ssaBlockCode = [(index, rewriteInstr instr) | (index, instr) <- ssaBlockCode block]
+        }
+    rewritePhi phi =
+      phi {ssaPhiInputs = [(predId, replaceSSAPlace replacements place) | (predId, place) <- ssaPhiInputs phi]}
+    rewriteInstr instr =
+      instr {ssaInstrFields = rewriteInstrFields instr}
+    rewriteInstrFields instr =
+      [ (name, rewriteField name place)
+      | (name, place) <- ssaInstrFields instr
+      ]
+      where
+        rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
+        uses = Set.fromList (ssaUseFieldNames rawInstr)
+        rewriteField name place
+          | name `Set.member` uses || "_in" `isSuffixOf` name = replaceSSAPlace replacements place
+          | otherwise = place
+
+replaceSSAPlace :: Map.Map SSAPlaceKey SSAPlace -> SSAPlace -> SSAPlace
+replaceSSAPlace replacements = go Set.empty
+  where
+    go seen place =
+      case ssaReplacementKey place of
+        Just key
+          | key `Set.member` seen -> place
+          | Just next <- Map.lookup key replacements -> go (Set.insert key seen) next
+        _ -> place
+
+ssaReplacementKey :: SSAPlace -> Maybe SSAPlaceKey
+ssaReplacementKey place
+  | isSSAPlace (ssaPlaceBase place)
+  , Just version <- ssaPlaceVersion place
+  , version > 0 =
+      let (ty, value) = ssaVariableKey (ssaPlaceBase place)
+       in Just (ty, value, version)
+  | otherwise = Nothing
+
+newtype ComparableSSAPlace = ComparableSSAPlace {comparableSSAPlace :: SSAPlace}
+  deriving (Show)
+
+instance Eq ComparableSSAPlace where
+  left == right = compare left right == EQ
+
+instance Ord ComparableSSAPlace where
+  compare (ComparableSSAPlace left) (ComparableSSAPlace right) =
+    compare
+      (ssaVariableKey (ssaPlaceBase left), ssaPlaceVersion left)
+      (ssaVariableKey (ssaPlaceBase right), ssaPlaceVersion right)
+
+mapSSABlocks :: (SSABlock -> SSABlock) -> SSAMethod -> SSAMethod
+mapSSABlocks update method =
+  method {ssaMethodBlocks = map update (ssaMethodBlocks method)}
+
 ssaDefinedPlaces :: (Place -> Bool) -> Instr -> [Place]
 ssaDefinedPlaces ssaPlacePredicate instr =
   uniquePlaces [place | name <- ssaDefFieldNames instr, let place = fieldPlace name instr, ssaPlacePredicate place]
@@ -603,7 +751,7 @@ lowerSSAMethod method =
 
     lowerBlock block =
       labelForBlock block
-        <> lowerBlockCode block (Map.findWithDefault [] (ssaBlockId block) edgeCopies)
+        <> lowerBlockCode block (Map.findWithDefault Map.empty (ssaBlockId block) edgeCopies)
 
     labelForBlock block
       | ssaBlockId block == "entry" = []
@@ -618,7 +766,7 @@ lowerSSAMethod method =
                in reverse restRev <> copies <> [terminal]
           | isJumpInstruction (instrType terminal) ->
               let target = placeValue (fieldPlace "target" terminal)
-                  fallthroughs = [succId | succId <- ssaBlockSuccs block, succId /= target]
+                  fallthroughs = [succId | succId <- ssaBlockSuccs block, succId `Set.notMember` Set.singleton target]
                   fallthrough = listToMaybe fallthroughs
                   (terminal', targetSplits) = splitConditionalTarget terminal target (copiesFor target)
                   fallthroughJump =
@@ -638,7 +786,7 @@ lowerSSAMethod method =
             _ -> loweredCode
       where
         loweredCode = concatMap (lowerSSAInstr placeMap . snd) (ssaBlockCode block)
-        copiesFor succId = fromMaybe [] (lookup succId copiesFromBlock)
+        copiesFor succId = Map.findWithDefault [] succId copiesFromBlock
         splitLabel succId = ".ssa_phi_" <> sanitizeBlockId (ssaBlockId block) <> "_" <> sanitizeBlockId succId
         splitOrOriginalTarget succId copies
           | null copies = succId
@@ -693,8 +841,14 @@ ssaPlaceKey place
   | isRegisterSSAPlace (ssaPlaceBase place)
   , Just version <- ssaPlaceVersion place
   , version > 0 =
-      Just (placeType (ssaPlaceBase place), placeValue (ssaPlaceBase place), version)
+      let (ty, value) = ssaVariableKey (ssaPlaceBase place)
+       in Just (ty, value, version)
   | otherwise = Nothing
+
+ssaVariableKey :: Place -> (String, String)
+ssaVariableKey place
+  | placeType place == "pr" = ("t", placeValue place)
+  | otherwise = (placeType place, placeValue place)
 
 lowerSSAPlace :: Map.Map SSAPlaceKey Place -> SSAPlace -> Place
 lowerSSAPlace placeMap place =
@@ -706,7 +860,7 @@ lowerSSAPlace placeMap place =
           Place "i" "0"
       | otherwise -> ssaPlaceBase place
 
-ssaEdgeCopies :: Map.Map SSAPlaceKey Place -> SSAMethod -> Map.Map BlockId [(BlockId, [Instr])]
+ssaEdgeCopies :: Map.Map SSAPlaceKey Place -> SSAMethod -> EdgeCopies
 ssaEdgeCopies placeMap method =
   foldl' addBlock Map.empty (ssaMethodBlocks method)
   where
@@ -721,24 +875,10 @@ ssaEdgeCopies placeMap method =
                   if source' == dest
                     then []
                     else [Instr "mov" [("source", source'), ("dest", dest)] []]
-             in Map.insertWith
-                  mergeEdges
-                  predId
-                  [(succId, copy)]
-                  inner
+             in Map.insertWith (Map.unionWith (<>)) predId (Map.singleton succId copy) inner
         )
         acc
         (ssaPhiInputs phi)
-    mergeEdges new old =
-      foldl'
-        ( \acc (succId, copies) ->
-            case lookup succId acc of
-              Just existing ->
-                (succId, existing <> copies) : [(otherSucc, otherCopies) | (otherSucc, otherCopies) <- acc, otherSucc /= succId]
-              Nothing -> acc <> [(succId, copies)]
-        )
-        old
-        new
 
 lowerSSAInstr :: Map.Map SSAPlaceKey Place -> SSAInstr -> [Instr]
 lowerSSAInstr placeMap instr =
@@ -795,67 +935,98 @@ uniquePlaces = go Set.empty
       | otherwise = place : go (Set.insert (key place) seen) rest
 
 renderSSA :: SSAProgram -> [String]
-renderSSA program =
-  concatMap renderSSAMethod (ssaProgramMethods program)
-    <> ["GLOBAL_SIZE\t" <> show (ssaProgramGlobalSize program)]
-    <> zipWith renderGlobalInstr [(1 :: Int) ..] (ssaProgramGlobalInstructions program)
+renderSSA =
+  lines . PPString.renderString . PP.layoutPretty PP.defaultLayoutOptions . prettySSA
 
-renderSSAMethod :: SSAMethod -> [String]
-renderSSAMethod method =
-  ["METHOD_SSA\t" <> ssaMethodName method <> "\tLOCAL_SIZE=" <> show (ssaMethodLocalSize method)]
-    <> concatMap renderSSABlock (ssaMethodBlocks method)
+prettySSA :: SSAProgram -> PP.Doc ann
+prettySSA program =
+  PP.vsep $
+    map prettySSAMethod (ssaProgramMethods program)
+      <> [PP.pretty "GLOBAL_SIZE" <> tabDoc <> PP.pretty (show (ssaProgramGlobalSize program))]
+      <> zipWith prettyGlobalInstr [(1 :: Int) ..] (ssaProgramGlobalInstructions program)
 
-renderSSABlock :: SSABlock -> [String]
-renderSSABlock block =
-  [ "BLOCK\t"
-      <> ssaBlockId block
-      <> "\tpreds="
-      <> intercalate "," (ssaBlockPreds block)
-      <> "\tsuccs="
-      <> intercalate "," (ssaBlockSuccs block)
-  ]
-    <> map renderPhi (sortBy comparePhi (ssaBlockPhis block))
-    <> [renderSSAInstr index instr | (index, instr) <- ssaBlockCode block]
+prettySSAMethod :: SSAMethod -> PP.Doc ann
+prettySSAMethod method =
+  PP.vsep $
+    [ PP.pretty "METHOD_SSA"
+        <> tabDoc
+        <> PP.pretty (ssaMethodName method)
+        <> tabDoc
+        <> PP.pretty "LOCAL_SIZE="
+        <> PP.pretty (show (ssaMethodLocalSize method))
+    ]
+      <> map prettySSABlock (ssaMethodBlocks method)
+
+prettySSABlock :: SSABlock -> PP.Doc ann
+prettySSABlock block =
+  PP.vsep $
+    [ PP.pretty "BLOCK"
+        <> tabDoc
+        <> PP.pretty (ssaBlockId block)
+        <> tabDoc
+        <> PP.pretty "preds="
+        <> commaSepDocs (map PP.pretty (ssaBlockPreds block))
+        <> tabDoc
+        <> PP.pretty "succs="
+        <> commaSepDocs (map PP.pretty (ssaBlockSuccs block))
+    ]
+      <> map prettyPhi (sortBy comparePhi (ssaBlockPhis block))
+      <> [prettySSAInstr index instr | (index, instr) <- ssaBlockCode block]
 
 comparePhi :: SSAPhi -> SSAPhi -> Ordering
 comparePhi left right = compare (renderPlace (ssaPhiBase left)) (renderPlace (ssaPhiBase right))
 
-renderPhi :: SSAPhi -> String
-renderPhi phi =
-  "phi\tbase="
-    <> renderPlace (ssaPhiBase phi)
-    <> "\tdest="
-    <> renderSSAPlace (ssaPhiDest phi)
-    <> "\tinputs="
-    <> intercalate "," [predId <> ":" <> renderSSAPlace place | (predId, place) <- ssaPhiInputs phi]
+prettyPhi :: SSAPhi -> PP.Doc ann
+prettyPhi phi =
+  PP.pretty "phi"
+    <> tabDoc
+    <> PP.pretty "base="
+    <> prettyPlace (ssaPhiBase phi)
+    <> tabDoc
+    <> PP.pretty "dest="
+    <> prettySSAPlace (ssaPhiDest phi)
+    <> tabDoc
+    <> PP.pretty "inputs="
+    <> commaSepDocs [PP.pretty predId <> PP.pretty ":" <> prettySSAPlace place | (predId, place) <- ssaPhiInputs phi]
 
-renderSSAInstr :: Int -> SSAInstr -> String
-renderSSAInstr index instr =
-  show index
-    <> "\t"
-    <> ssaInstrType instr
-    <> concatMap renderField (ssaInstrFields instr)
-    <> concatMap renderStringField (ssaInstrStringFields instr)
+prettySSAInstr :: Int -> SSAInstr -> PP.Doc ann
+prettySSAInstr index instr =
+  PP.pretty (show index)
+    <> tabDoc
+    <> PP.pretty (ssaInstrType instr)
+    <> PP.hcat (map prettyField (ssaInstrFields instr))
+    <> PP.hcat (map prettyStringField (ssaInstrStringFields instr))
 
-renderGlobalInstr :: Int -> Instr -> String
-renderGlobalInstr index instr =
-  "GLOBAL\t"
-    <> show index
-    <> "\t"
-    <> instrType instr
-    <> concatMap (\(name, place) -> "\t" <> name <> "=" <> renderPlace place) (instrFields instr)
-    <> concatMap renderStringField (instrStringFields instr)
+prettyGlobalInstr :: Int -> Instr -> PP.Doc ann
+prettyGlobalInstr index instr =
+  PP.pretty "GLOBAL"
+    <> tabDoc
+    <> PP.pretty (show index)
+    <> tabDoc
+    <> PP.pretty (instrType instr)
+    <> PP.hcat [tabDoc <> PP.pretty name <> PP.pretty "=" <> prettyPlace place | (name, place) <- instrFields instr]
+    <> PP.hcat (map prettyStringField (instrStringFields instr))
 
-renderField :: (String, SSAPlace) -> String
-renderField (name, place) = "\t" <> name <> "=" <> renderSSAPlace place
+prettyField :: (String, SSAPlace) -> PP.Doc ann
+prettyField (name, place) = tabDoc <> PP.pretty name <> PP.pretty "=" <> prettySSAPlace place
 
-renderStringField :: (String, String) -> String
-renderStringField (name, value) = "\t" <> name <> "=" <> value
+prettyStringField :: (String, String) -> PP.Doc ann
+prettyStringField (name, value) = tabDoc <> PP.pretty name <> PP.pretty "=" <> PP.pretty value
 
-renderSSAPlace :: SSAPlace -> String
-renderSSAPlace place =
-  renderPlace (ssaPlaceBase place)
-    <> maybe "" (\version -> "#" <> show version) (ssaPlaceVersion place)
+prettySSAPlace :: SSAPlace -> PP.Doc ann
+prettySSAPlace place =
+  prettyPlace (ssaPlaceBase place)
+    <> maybe mempty (\version -> PP.pretty "#" <> PP.pretty (show version)) (ssaPlaceVersion place)
+
+prettyPlace :: Place -> PP.Doc ann
+prettyPlace place = PP.pretty (placeType place) <> PP.pretty ":" <> PP.pretty (placeValue place)
 
 renderPlace :: Place -> String
-renderPlace place = placeType place <> ":" <> placeValue place
+renderPlace =
+  PPString.renderString . PP.layoutPretty PP.defaultLayoutOptions . prettyPlace
+
+commaSepDocs :: [PP.Doc ann] -> PP.Doc ann
+commaSepDocs = PP.hcat . PP.punctuate (PP.pretty ",")
+
+tabDoc :: PP.Doc ann
+tabDoc = PP.pretty "\t"
