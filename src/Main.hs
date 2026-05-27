@@ -14,6 +14,7 @@ import Tptcc.IRSimpleTac (dumpSimpleTac)
 import Tptcc.Lexer (lexC)
 import Tptcc.Operand (Operand (..), renderOperandValue)
 import qualified Tptcc.Parser as Parser
+import Tptcc.SSA (dumpSSA)
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..), Token (..), TokenValue (..))
 import qualified Tptcc.TypeChecker as TypeChecker
@@ -22,7 +23,8 @@ usage :: String
 usage =
   "Usage: tptcc-hs input.c [--output output.asm] [--size total-memory-size] "
     <> "[--term-width width] [--term-height height] [--offset offset] "
-    <> "[--symbols symbols.json] [--breakpoints \"[5, 8, 13]\"]"
+    <> "[--symbols symbols.json] [--breakpoints \"[5, 8, 13]\"] "
+    <> "[--dump-ssa input.c]"
 
 main :: IO ()
 main = do
@@ -33,6 +35,7 @@ main = do
     ["--dump-type-events", input] -> dumpTypeEvents input
     ["--dump-ir-globals", input] -> dumpIRGlobalEvents input
     ["--dump-simple-tac", input] -> dumpSimpleTacEvents input
+    ["--dump-ssa", input] -> dumpSSAEvents input
     ["--dump-native-asm-unoptimized", input] -> dumpNativeAsmUnoptimizedEvents input
     ["--dump-native-asm-optimized", input] -> dumpNativeAsmOptimizedEvents input
     ["--dump-default-symbols"] -> dumpDefaultSymbols
@@ -156,6 +159,15 @@ dumpSimpleTacEvents :: FilePath -> IO ()
 dumpSimpleTacEvents input = do
   source <- readFile input
   case Parser.parse (lexC source) >>= dumpSimpleTac of
+    Left err -> do
+      putStrLn err
+      exitWith (ExitFailure 1)
+    Right events -> mapM_ putStrLn events
+
+dumpSSAEvents :: FilePath -> IO ()
+dumpSSAEvents input = do
+  source <- readFile input
+  case Parser.parse (lexC source) >>= dumpSSA of
     Left err -> do
       putStrLn err
       exitWith (ExitFailure 1)
