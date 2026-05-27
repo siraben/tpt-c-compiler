@@ -6,8 +6,10 @@ module Tptcc.CodeGen
   , dumpNativeAsmOptimizedWithOptions
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (foldM)
 import Data.List (find, sortBy)
+import Data.Maybe (listToMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -172,7 +174,7 @@ renderGlobalInstructions options optimized instructions = do
   lowered <-
     if optimized
       then do
-        (allocated, _) <- allocateRegisters abstractLowered
+        (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
         pure (peephole options allocated)
       else pure abstractLowered
   pure (concatMap (renderInstr options 0) lowered)
@@ -281,19 +283,26 @@ standardLibraryCode =
 
 renderMethod :: CodeGenOptions -> Bool -> MethodOutput -> Either String String
 renderMethod options optimized method = do
-  (allocated, _) <-
+  (allocated, _, allocatedLocalSize) <-
     if optimized
-      then allocateRegisters abstractLowered
-      else pure (abstractLowered, [])
-  let lowered =
+      then allocateMethodRegisters sourceLocalSize optimizedInstructions
+      else pure (abstractLowered, [], sourceLocalSize)
+  let loweredAbstract =
         if optimized
-          then optimizeMethodTail method (peephole options allocated)
+          then map (lowerAbstract options allocatedLocalSize) allocated
           else allocated
+      lowered =
+        if optimized
+          then optimizeMethodTail method (peephole options loweredAbstract)
+          else loweredAbstract
       usedRegisters = usedAllocatedRegisters lowered
       savedRegisters
         | methodOutputName method == "main" = []
         | otherwise = usedRegisters
-      needsFrame = not optimized || localSize > 0 || any instrTouchesFrame lowered
+      frameLocalSize
+        | optimized && not (any instrTouchesFrame lowered) = 0
+        | otherwise = allocatedLocalSize
+      needsFrame = not optimized || frameLocalSize > 0 || any instrTouchesFrame lowered
       frameSetup
         | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
         | otherwise = ""
@@ -301,10 +310,10 @@ renderMethod options optimized method = do
         | needsFrame = "\tpop base_pointer\n"
         | otherwise = ""
       localAllocation
-        | localSize > 0 = "\tsub stack_pointer, " <> show localSize <> "\n"
+        | frameLocalSize > 0 = "\tsub stack_pointer, " <> show frameLocalSize <> "\n"
         | otherwise = ""
       localRelease
-        | localSize > 0 = "\tadd stack_pointer, " <> show localSize <> "\n"
+        | frameLocalSize > 0 = "\tadd stack_pointer, " <> show frameLocalSize <> "\n"
         | otherwise = ""
   pure $
     "__tptcc_fn_"
@@ -313,7 +322,7 @@ renderMethod options optimized method = do
       <> localAllocation
       <> frameSetup
       <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
-      <> concatMap (renderInstr options localSize) lowered
+      <> concatMap (renderInstr options allocatedLocalSize) lowered
       <> ".exit_"
       <> methodOutputName method
       <> ":\n"
@@ -324,8 +333,13 @@ renderMethod options optimized method = do
         then "\thlt\n"
         else "\tret\n"
   where
-    localSize = methodOutputLocalSize method
-    abstractLowered = map (lowerAbstract options localSize) (methodOutputInstructions method)
+    sourceLocalSize = methodOutputLocalSize method
+    optimizedSource =
+      if optimized
+        then promoteScalarLocals (methodOutputInstructions method)
+        else methodOutputInstructions method
+    abstractLowered = map (lowerAbstract options sourceLocalSize) optimizedSource
+    optimizedInstructions = optimizeInstructions optimizedSource
 
 lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
 lowerAbstract options localSize instr
@@ -347,6 +361,175 @@ emitGetAddress localSize target dest =
     "l" -> Instr "add3" [("source", Place "r" "base_pointer"), ("offset", Place "i" (show (placeInteger target + 1))), ("dest", dest)] []
     "pr" -> Instr "mov" [("source", target), ("dest", dest)] []
     _ -> Instr "nop" [] []
+
+promoteScalarLocals :: [Instr] -> [Instr]
+promoteScalarLocals instrs =
+  map rewriteInstr instrs
+  where
+    addressTaken =
+      Set.fromList
+        [ placeInteger target
+        | instr <- instrs
+        , instrType instr == "!get_address"
+        , let target = fieldPlace "target" instr
+        , placeType target == "l"
+        ]
+    localSlots =
+      Set.fromList
+        [ placeInteger place
+        | instr <- instrs
+        , (_, place) <- instrFields instr
+        , placeType place == "l"
+        ]
+    promotable = Set.difference localSlots addressTaken
+    firstTemp = 1 + maximum (0 : [placeInteger place | instr <- instrs, (_, place) <- instrFields instr, isVirtualRegister place])
+    localRegisters =
+      Map.fromList
+        [ (slot, Place "t" (show (firstTemp + fromIntegral index)))
+        | (index, slot) <- zip [(0 :: Int) ..] (Set.toAscList promotable)
+        ]
+
+    promotedLocal place =
+      Map.lookup (placeInteger place) localRegisters
+
+    rewriteInstr instr
+      | instrType instr == "st"
+      , placeType (fieldPlace "dest" instr) == "l"
+      , Just dest <- promotedLocal (fieldPlace "dest" instr) =
+          Instr "mov" [("source", fieldPlace "source" instr), ("dest", dest)] []
+      | instrType instr == "ld"
+      , placeType (fieldPlace "source" instr) == "l"
+      , Just source <- promotedLocal (fieldPlace "source" instr) =
+          Instr "mov" [("source", source), ("dest", fieldPlace "dest" instr)] []
+      | otherwise = instr
+
+optimizeInstructions :: [Instr] -> [Instr]
+optimizeInstructions = eliminateDeadVirtualWrites . propagateCopiesAndConstants
+
+type CopyEnv = Map.Map (String, String) Place
+
+propagateCopiesAndConstants :: [Instr] -> [Instr]
+propagateCopiesAndConstants = reverse . snd . foldl' step (Map.empty, [])
+  where
+    step (env, out) instr
+      | instructionStopsPropagation instr = (Map.empty, instr : out)
+      | otherwise =
+          let rewritten = rewriteInstructionUses env instr
+              envAfterDefs = foldl' (flip Map.delete) env (definedPlaceKeys rewritten)
+              env' = updateCopyEnv envAfterDefs rewritten
+           in (env', rewritten : out)
+
+instructionStopsPropagation :: Instr -> Bool
+instructionStopsPropagation instr =
+  instrType instr == "label"
+    || instrType instr == "call"
+    || instrType instr == "asm"
+    || instrType instr == "ret"
+    || isJumpInstruction (instrType instr)
+
+rewriteInstructionUses :: CopyEnv -> Instr -> Instr
+rewriteInstructionUses env instr =
+  instr {instrFields = [(name, rewriteUse name place) | (name, place) <- instrFields instr]}
+  where
+    uses = [name | name <- useFieldNames instr, name `notElem` defFieldNames instr]
+    rewriteUse name place
+      | name `elem` uses =
+          let resolved = resolveEnvPlace env place
+           in if placeType resolved == "i" && not (fieldAcceptsImmediate instr name)
+                then place
+                else resolved
+      | otherwise = place
+
+fieldAcceptsImmediate :: Instr -> String -> Bool
+fieldAcceptsImmediate instr name =
+  case instrType instr of
+    "mov" -> name == "source"
+    "cmp" -> name == "second"
+    "add3" -> name `elem` ["source", "offset"]
+    "ldoffset" -> name == "offset"
+    "mulh" -> name == "third"
+    "mull3" -> name == "third"
+    "sub3" -> name == "third"
+    "shr3" -> name == "third"
+    "add" -> name == "source"
+    "sub" -> name == "source"
+    "mull" -> name == "source"
+    "shl" -> name == "source"
+    "shr" -> name == "source"
+    "xor" -> name == "source"
+    "and" -> name == "source"
+    "or" -> name == "source"
+    _ -> False
+
+resolveEnvPlace :: CopyEnv -> Place -> Place
+resolveEnvPlace env = go Set.empty
+  where
+    go seen place =
+      case placeKey place of
+        Just key
+          | key `Set.member` seen -> place
+          | Just next <- Map.lookup key env -> go (Set.insert key seen) next
+        _ -> place
+
+definedPlaceKeys :: Instr -> [(String, String)]
+definedPlaceKeys instr =
+  [ key
+  | name <- defFieldNames instr
+  , let place = fieldPlace name instr
+  , Just key <- [placeKey place]
+  ]
+
+updateCopyEnv :: CopyEnv -> Instr -> CopyEnv
+updateCopyEnv env instr
+  | instrType instr == "mov"
+  , Just destKey <- placeKey (fieldPlace "dest" instr)
+  , isPropagatablePlace source =
+      Map.insert destKey source env
+  | otherwise = env
+  where
+    source = fieldPlace "source" instr
+
+isPropagatablePlace :: Place -> Bool
+isPropagatablePlace place =
+  placeType place `elem` ["i", "t", "vr", "pr", "r"]
+
+placeKey :: Place -> Maybe (String, String)
+placeKey place
+  | isVirtualRegister place = Just (placeType place, placeValue place)
+  | otherwise = Nothing
+
+eliminateDeadVirtualWrites :: [Instr] -> [Instr]
+eliminateDeadVirtualWrites instrs =
+  [instr | (_, instr) <- sortBy compareIndexedInstruction kept]
+  where
+    blocks =
+      sortBlocks $
+        livenessAnalysis $
+          map buildBlockUseDef (buildBasicBlocks instrs)
+    kept = concatMap keepBlock blocks
+
+    keepBlock block =
+      snd $
+        foldr step (blockLiveOut block, []) (blockCode block)
+
+    step indexed@(_, instr) (live, keptInstrs)
+      | pureVirtualDefinition instr
+      , let (_, defs) = instructionUseDef instr
+      , Set.null (Set.intersection defs live) =
+          (live, keptInstrs)
+      | otherwise =
+          let (uses, defs) = instructionUseDef instr
+              live' = Set.union uses (Set.difference live defs)
+           in (live', indexed : keptInstrs)
+
+    compareIndexedInstruction (left, _) (right, _) = compare left right
+
+pureVirtualDefinition :: Instr -> Bool
+pureVirtualDefinition instr =
+  pureRegisterDefinition instr
+    && case defFieldNames instr of
+      [name] -> isVirtualRegister (fieldPlace name instr)
+      _ -> False
 
 data BasicBlock = BasicBlock
   { blockId :: String
@@ -377,6 +560,35 @@ emptyBlock ident predIds succIds =
 
 allocateRegisters :: [Instr] -> Either String ([Instr], [Integer])
 allocateRegisters tac =
+  allocateRegistersNoSpill tac
+
+allocateMethodRegisters :: Integer -> [Instr] -> Either String ([Instr], [Integer], Integer)
+allocateMethodRegisters baseLocalSize tac = go baseLocalSize tac
+  where
+    go nextSpillSlot currentTac =
+      case colourTac currentTac of
+        Right colours ->
+          let rewritten = map (rewriteInstrRegisters colours) currentTac
+              used = usedAllocatedRegisters rewritten
+           in pure (rewritten, used, nextSpillSlot)
+        Left reg ->
+          go (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (show nextSpillSlot)) currentTac)
+
+allocateRegistersNoSpill :: [Instr] -> Either String ([Instr], [Integer])
+allocateRegistersNoSpill tac = do
+  colours <- either allocationError pure (colourTac tac)
+  let rewritten = map (rewriteInstrRegisters colours) tac
+      used = usedAllocatedRegisters rewritten
+  pure (rewritten, used)
+  where
+    allocationError reg =
+      Left $
+        "register allocation exhausted for virtual register "
+          <> show reg
+          <> ": all allocatable registers r1-r19 are live"
+
+colourTac :: [Instr] -> Either Integer (Map.Map Integer Integer)
+colourTac tac =
   let blocks0 = buildBasicBlocks tac
       blocks1 = map buildBlockUseDef blocks0
       blocks2 = livenessAnalysis blocks1
@@ -384,11 +596,8 @@ allocateRegisters tac =
       blocks3 = map computePerInstructionLiveness ordered
       graph = buildInterferenceGraph blocks3
       colourOrder = luaIntegerPairsOrder (Map.keys graph)
-   in do
-        colours <- colourGraph colourOrder graph
-        let rewritten = map (rewriteInstrRegisters colours) tac
-            used = uniqueInOrder [colours Map.! reg | reg <- colourOrder, Map.member reg colours]
-        pure (rewritten, used)
+      preferences = movePreferences tac
+   in colourGraph preferences colourOrder graph
 
 buildBasicBlocks :: [Instr] -> [BasicBlock]
 buildBasicBlocks tac = finalBlocks
@@ -526,19 +735,22 @@ buildInterferenceGraph blocks =
       Map.insertWith Set.union b (Set.singleton a) $
         Map.insertWith Set.union a (Set.singleton b) graph
 
-colourGraph :: [Integer] -> Map.Map Integer (Set.Set Integer) -> Either String (Map.Map Integer Integer)
-colourGraph order graph =
+colourGraph :: Map.Map Integer [Integer] -> [Integer] -> Map.Map Integer (Set.Set Integer) -> Either Integer (Map.Map Integer Integer)
+colourGraph preferences order graph =
   foldM colourOne Map.empty order
   where
     colourOne mapping reg =
       let usedColours = Set.fromList [usedColour | neighbour <- Set.toList (Map.findWithDefault Set.empty reg graph), Just usedColour <- [Map.lookup neighbour mapping]]
-       in case firstAvailableColour usedColours of
+          preferredColours =
+            [ colour
+            | preferred <- Map.findWithDefault [] reg preferences
+            , Just colour <- [Map.lookup preferred mapping]
+            , colour `Set.notMember` usedColours
+            ]
+          chosen = listToMaybe preferredColours <|> firstAvailableColour usedColours
+       in case chosen of
             Just chosenColour -> pure (Map.insert reg chosenColour mapping)
-            Nothing ->
-              Left $
-                "register allocation exhausted for virtual register "
-                  <> show reg
-                  <> ": all allocatable registers r1-r21 are live"
+            Nothing -> Left reg
 
 luaIntegerPairsOrder :: [Integer] -> [Integer]
 luaIntegerPairsOrder keys =
@@ -582,7 +794,16 @@ uniqueInOrder = go Set.empty
       | otherwise = value : go (Set.insert value seen) rest
 
 allocatableRegisters :: [Integer]
-allocatableRegisters = [1 .. 21]
+allocatableRegisters = [1 .. 19]
+
+callerSafeRegisters :: [Integer]
+callerSafeRegisters = [1 .. 21]
+
+spillScratchA :: Place
+spillScratchA = Place "r" "20"
+
+spillScratchB :: Place
+spillScratchB = Place "r" "21"
 
 firstAvailableColour :: Set.Set Integer -> Maybe Integer
 firstAvailableColour used =
@@ -601,9 +822,67 @@ allocatedPhysicalRegister :: Place -> Maybe Integer
 allocatedPhysicalRegister place
   | placeType place == "r" =
       case reads (placeValue place) of
-        [(reg, "")] | reg `elem` allocatableRegisters -> Just reg
+        [(reg, "")] | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
   | otherwise = Nothing
+
+movePreferences :: [Instr] -> Map.Map Integer [Integer]
+movePreferences =
+  foldl' addPreference Map.empty
+  where
+    addPreference preferences instr
+      | instrType instr == "mov"
+          && isVirtualRegister source
+          && isVirtualRegister dest =
+          Map.insertWith (<>) (placeInteger source) [placeInteger dest] $
+            Map.insertWith (<>) (placeInteger dest) [placeInteger source] preferences
+      | otherwise = preferences
+      where
+        source = fieldPlace "source" instr
+        dest = fieldPlace "dest" instr
+
+spillVirtualRegister :: Integer -> Place -> [Instr] -> [Instr]
+spillVirtualRegister reg spillSlot =
+  concatMap rewrite
+  where
+    rewrite instr =
+      let uses = useFieldNames instr
+          defs = defFieldNames instr
+          usedFields = [(name, place) | (name, place) <- instrFields instr, name `elem` uses, isSpilled place]
+          defFields = [(name, place) | (name, place) <- instrFields instr, name `elem` defs, isSpilled place]
+          scratchPool = availableScratchRegisters instr
+          scratchForUse index = scratchPool !! min index (length scratchPool - 1)
+          useScratch = Map.fromList [(name, scratchForUse index) | (index, (name, _)) <- zip [(0 :: Int) ..] usedFields]
+          defScratch = Map.fromList [(name, Map.findWithDefault spillScratchA name useScratch) | (name, _) <- defFields]
+          scratchByField = Map.union useScratch defScratch
+          loads = [Instr "ld" [("source", spillSlot), ("dest", scratch)] [] | scratch <- uniquePlaces (Map.elems useScratch)]
+          rewritten =
+            instr
+              { instrFields =
+                  [ (name, Map.findWithDefault place name scratchByField)
+                  | (name, place) <- instrFields instr
+                  ]
+              }
+          stores = [Instr "st" [("source", scratch), ("dest", spillSlot)] [] | scratch <- uniquePlaces (Map.elems defScratch)]
+       in loads <> [rewritten] <> stores
+
+    isSpilled place =
+      isVirtualRegister place && placeInteger place == reg
+
+    uniquePlaces = go []
+      where
+        go _ [] = []
+        go seen (place : rest)
+          | place `elem` seen = go seen rest
+          | otherwise = place : go (place : seen) rest
+
+availableScratchRegisters :: Instr -> [Place]
+availableScratchRegisters instr =
+  available <> occupiedScratch
+  where
+    scratch = [spillScratchA, spillScratchB]
+    occupiedScratch = [place | (_, place) <- instrFields instr, place `elem` scratch]
+    available = [place | place <- scratch, place `notElem` occupiedScratch]
 
 rewriteInstrRegisters :: Map.Map Integer Integer -> Instr -> Instr
 rewriteInstrRegisters colours instr =
@@ -619,32 +898,67 @@ rewritePlace colours place
 
 instructionUseDef :: Instr -> (Set.Set Integer, Set.Set Integer)
 instructionUseDef instr =
+  (regSet (useFieldNames instr), regSet (defFieldNames instr))
+  where
+    regSet names = Set.fromList [placeInteger place | name <- names, let place = fieldPlace name instr, isVirtualRegister place]
+
+useFieldNames :: Instr -> [String]
+useFieldNames instr =
   case instrType instr of
-    "st" -> (regSet ["dest", "source"], Set.empty)
-    "ld" -> (regSet ["source"], regSet ["dest"])
-    "push" -> (regSet ["target"], Set.empty)
-    "pop" -> (Set.empty, regSet ["target"])
-    "call" -> (regSet ["target"], Set.empty)
-    "add3" -> (regSet ["source", "offset"], regSet ["dest"])
-    "ldoffset" -> (regSet ["source", "offset"], regSet ["dest"])
-    "cmp" -> (regSet ["first", "second"], Set.empty)
+    "st" -> ["dest", "source"]
+    "ld" -> ["source"]
+    "push" -> ["target"]
+    "pop" -> []
+    "call" -> ["target"]
+    "add3" -> ["source", "offset"]
+    "ldoffset" -> ["source", "offset"]
+    "cmp" -> ["first", "second"]
     "add" -> useDest
     "sub" -> useDest
     "mull" -> useDest
     "shl" -> useDest
     "shr" -> useDest
-    "shr3" -> (regSet ["source", "third"], regSet ["dest"])
+    "shr3" -> ["source", "third"]
     "xor" -> useDest
     "and" -> useDest
     "or" -> useDest
-    "asm" -> (Set.empty, Set.empty)
-    "mulh" -> (regSet ["source", "third"], regSet ["dest"])
-    "mull3" -> (regSet ["source", "third"], regSet ["dest"])
-    "sub3" -> (regSet ["source", "third"], regSet ["dest"])
-    _ -> (regSet ["source"], regSet ["dest"])
+    "asm" -> []
+    "mulh" -> ["source", "third"]
+    "mull3" -> ["source", "third"]
+    "sub3" -> ["source", "third"]
+    ty
+      | take 1 ty == "j" -> []
+      | otherwise -> ["source"]
   where
-    useDest = (regSet ["source", "dest"], regSet ["dest"])
-    regSet names = Set.fromList [placeInteger place | name <- names, let place = fieldPlace name instr, isVirtualRegister place]
+    useDest = ["source", "dest"]
+
+defFieldNames :: Instr -> [String]
+defFieldNames instr =
+  case instrType instr of
+    "st" -> []
+    "ld" -> ["dest"]
+    "push" -> []
+    "pop" -> ["target"]
+    "call" -> []
+    "add3" -> ["dest"]
+    "ldoffset" -> ["dest"]
+    "cmp" -> []
+    "add" -> ["dest"]
+    "sub" -> ["dest"]
+    "mull" -> ["dest"]
+    "shl" -> ["dest"]
+    "shr" -> ["dest"]
+    "shr3" -> ["dest"]
+    "xor" -> ["dest"]
+    "and" -> ["dest"]
+    "or" -> ["dest"]
+    "asm" -> []
+    "mulh" -> ["dest"]
+    "mull3" -> ["dest"]
+    "sub3" -> ["dest"]
+    ty
+      | take 1 ty == "j" -> []
+      | otherwise -> ["dest"]
 
 isVirtualRegister :: Place -> Bool
 isVirtualRegister place = placeType place `elem` ["t", "pr", "vr"]
@@ -656,6 +970,12 @@ peephole options instrs =
   where
     step c acc@(nc : rest)
       | instrType c == "mov" && fieldPlace "source" c == fieldPlace "dest" c = acc
+      | pureRegisterDefinition c
+      , Just def <- singleDefPlace c
+      , Just nextDef <- singleDefPlace nc
+      , def == nextDef
+      , def `notElem` usePlaces nc =
+          acc
       | instrType c == "st" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc =
           if fieldPlace "source" c == fieldPlace "dest" nc
             then c : rest
@@ -685,7 +1005,7 @@ peephole options instrs =
 
 optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
-  removeReturnRoundTrip . stripTrailingExitJump
+  removeTrailingDeadWrites . removeReturnRoundTrip . stripTrailingExitJump
   where
     exitTarget = Place "i" (".exit_" <> methodOutputName method)
 
@@ -708,6 +1028,35 @@ removeReturnRoundTrip instrs =
           && fieldPlace "dest" restore == Place "r" "return_reg" ->
           reverse rest
     _ -> instrs
+
+removeTrailingDeadWrites :: [Instr] -> [Instr]
+removeTrailingDeadWrites =
+  reverse . dropWhile trailingDeadWrite . reverse
+
+trailingDeadWrite :: Instr -> Bool
+trailingDeadWrite instr =
+  pureRegisterDefinition instr
+    && maybe False isCallerSafePhysicalRegister (singleDefPlace instr)
+
+pureRegisterDefinition :: Instr -> Bool
+pureRegisterDefinition instr =
+  instrType instr `elem` ["mov", "add", "sub", "mull", "shl", "shr", "xor", "and", "or", "add3", "shr3", "mulh", "mull3", "sub3"]
+
+singleDefPlace :: Instr -> Maybe Place
+singleDefPlace instr =
+  case defFieldNames instr of
+    [name] -> Just (fieldPlace name instr)
+    _ -> Nothing
+
+usePlaces :: Instr -> [Place]
+usePlaces instr =
+  [fieldPlace name instr | name <- useFieldNames instr]
+
+isCallerSafePhysicalRegister :: Place -> Bool
+isCallerSafePhysicalRegister place =
+  case allocatedPhysicalRegister place of
+    Just _ -> True
+    Nothing -> False
 
 instrTouchesFrame :: Instr -> Bool
 instrTouchesFrame instr =
