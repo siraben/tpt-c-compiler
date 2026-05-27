@@ -185,6 +185,26 @@ int main(void) {
 }
 C
 
+  cat >"$tmpdir/do-while-empty.c" <<'C'
+int main(void) {
+    int i = 0;
+    int sum = 0;
+    do {
+        i = i + 1;
+        if (i == 2) {
+            continue;
+        }
+        sum = sum + i;
+        ;
+    } while (i < 4);
+    do
+        ;
+    while (0);
+    putchar('0' + sum);
+    return 0;
+}
+C
+
   cat >"$tmpdir/compound-ternary.c" <<'C'
 int main(void) {
     int a = 3;
@@ -271,6 +291,7 @@ run_case short-circuit "42" "" "optimized unoptimized"
 run_case arrays-pointers "96"
 run_case global-matrix "56"
 run_case switch-loop ">"
+run_case do-while-empty "8" "" "optimized unoptimized"
 run_case compound-ternary "454"
 run_case input-flow "Ab0" "ab" "optimized unoptimized"
 

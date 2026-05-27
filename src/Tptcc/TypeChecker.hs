@@ -271,6 +271,10 @@ checkStatement statement = do
     "WHILE" -> do
       _ <- checkExpression =<< fieldNode "condition" child
       checkStatement =<< fieldNode "statement" child
+    "DO_WHILE" -> do
+      checkStatement =<< fieldNode "statement" child
+      _ <- checkExpression =<< fieldNode "condition" child
+      pure ()
     "SWITCH" -> do
       _ <- checkExpression =<< fieldNode "condition" child
       checkBlock =<< fieldNode "block" child

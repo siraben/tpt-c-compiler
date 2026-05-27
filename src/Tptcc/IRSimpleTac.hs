@@ -234,6 +234,7 @@ emitStatement statement = do
     "IF" -> emitIf child
     "BLOCK" -> emitBlock child
     "WHILE" -> emitWhile child
+    "DO_WHILE" -> emitDoWhile child
     "FOR" -> emitFor child
     "BREAK" -> emitBreak
     "CONTINUE" -> emitContinue
@@ -336,6 +337,20 @@ emitWhile node = do
   emit "label" [("target", trueLabel)]
   fieldNode "statement" node >>= emitStatement
   emit "jmp" [("target", startLabel)]
+  emit "label" [("target", endLabel)]
+  popLoopLabels
+
+emitDoWhile :: Node -> TacM ()
+emitDoWhile node = do
+  startLabel <- nextLabel
+  conditionLabel <- nextLabel
+  endLabel <- nextLabel
+  pushLoopLabels conditionLabel endLabel
+  emit "label" [("target", startLabel)]
+  fieldNode "statement" node >>= emitStatement
+  emit "label" [("target", conditionLabel)]
+  condition <- fieldNode "condition" node >>= firstExpressionChild
+  emitBoolControlFlow condition startLabel endLabel
   emit "label" [("target", endLabel)]
   popLoopLabels
 

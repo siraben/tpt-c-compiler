@@ -440,6 +440,7 @@ parseNonIfStatement = do
     "{" -> parseBlock
     "FOR" -> parseFor
     "WHILE" -> parseWhile
+    "DO" -> parseDoWhile
     "SWITCH" -> parseSwitch
     "CASE" -> parseCase
     "DEFAULT" -> parseDefault
@@ -522,6 +523,18 @@ parseWhile = do
   expect ")"
   statement <- parseStatement
   pure node {nodeFields = [NodeField "condition" (NodeRef condition), NodeField "statement" (NodeRef statement)]}
+
+parseDoWhile :: ParserM Node
+parseDoWhile = do
+  node <- emptyNode "DO_WHILE"
+  expect "DO"
+  statement <- parseStatement
+  expect "WHILE"
+  expect "("
+  condition <- parseExpression
+  expect ")"
+  expect ";"
+  pure node {nodeFields = [NodeField "statement" (NodeRef statement), NodeField "condition" (NodeRef condition)]}
 
 parseSwitch :: ParserM Node
 parseSwitch = do

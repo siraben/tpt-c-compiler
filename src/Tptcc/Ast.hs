@@ -80,6 +80,7 @@ nodeTypes =
     , "IF"
     , "FOR"
     , "WHILE"
+    , "DO_WHILE"
     , "RETURN"
     , "ADDRESS_OF"
     , "DEREFERENCE"

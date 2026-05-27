@@ -391,6 +391,9 @@ emitStatementIR method statement = do
     "WHILE" -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
+    "DO_WHILE" -> do
+      maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
+      maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
     "SWITCH" -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitBlockIR method) (fieldNodeMaybe "block" child)
