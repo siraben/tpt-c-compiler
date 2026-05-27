@@ -1,85 +1,103 @@
 
 # tpt-c-compiler
 
-A C compiler that emits TPTASM instructions specifically for [@lbphacker](https://github.com/lbphacker)'s R3 (a line of computers built in the simulation game "The Powder Toy")
+A C-dialect compiler that emits TPTASM for [@LBPHacker](https://github.com/LBPHacker)'s R3 computer family in The Powder Toy.
 
-The compiler is roughly based on ANSI C89 although some C features have not been implemented yet. A basic standard library is included with the compiler. Read further for the standard library documentation.
-
-  
-  
+The active compiler is the Haskell implementation in `src/`. The older Lua implementation is still present in the repository for reference, but new compiler work, optimization work, and emulator correctness tests target the Haskell executable.
 
 # Dependencies
 
-### LUA 5.4
-This compiler was developed and tested using Lua 5.4. You can download Lua 5.4 binaries from [here](https://sourceforge.net/projects/luabinaries/files/5.4.8/Tools%20Executables/).
+## Nix Development Shell
 
+The recommended workflow is:
 
-<!-- ### LPEG 1.1.0
-You can install this pattern matching library via luarocks or learn more about it [here](https://luarocks.org/modules/gvvaughan/lpeg) -->
+```bash
+nix develop
+cabal run -v0 exe:tptcc-hs -- input.c --output output.asm
+```
 
-  
+The flake provides the Haskell toolchain used by the compiler. The R3 correctness suite also expects an R3 emulator checkout, usually at `$HOME/R3emu`, unless `R3EMU_ROOT` or `R3EMU_BIN` is set.
 
-### TPTASM 1.1.3
+## R3, TPTASM, And R3Plot
 
-First install The Powder Toy's [Script Manager](https://powdertoy.co.uk/Discussions/Thread/View.html?Thread=19400) or alternatively, just install [Jacob1's Mod](https://powdertoy.co.uk/Discussions/Thread/View.html?Thread=11117) which has the Script Manager pre-installed. TPTASM can be installed by downloading it from the Script Manager.
+To load programs in The Powder Toy, you need an R3 in the simulation area. You can generate one with R3Plot or use an existing R3 save. TPTASM can be installed through The Powder Toy Script Manager or Jacob1's Mod.
 
-  
+After compiling, pass the generated assembly path to TPTASM from The Powder Toy's console:
 
-### R3Plot (Recommended)
-
-This script is not necessary but helps with configuring and generating custom R3s. Learn more about how to install and use it [here](https://github.com/LBPHacker/R316/blob/v2/manual.md#configuration).
-
-  
-
-Without this script, you will be confined to loading your custom programs on pre-existing R3s such as those in stamps or in saves made by others.
-
-  
+```lua
+tptasm("path/to/output.asm")
+```
 
 # Usage
 
-First, you must have an R3 in the simulation area. You can either use R3Plot to generate a custom R3 (recommended) or use the original [R3 demo](https://powdertoy.co.uk/Browse/View.html?ID=3236906) save (make sure not to start it).
-
-  
-
-In a terminal, use cli.lua to compile your program like in the following snippet. Note that the arguments encased in brackets represent optional arguments.
-
-  
-
 ```bash
-
-lua cli.lua input.c [--output output.asm] [--size total-memory-size] [--term-height terminal-rows] [--term-width terminal-cols] [--offset global-offset] [--symbols symbols.json] [--breakpoints "[5, 8, 13, ...]"]
-
-```
-|Optional Argument|Description|Default value|
-|-|:-:|:-:|
-|\-\-output|The name of the outputted .asm file|\<input-file-name\>.asm|
-|\-\-size|The total memory size in words or memory_rows * 128|2048|
-|\-\-term-height|The number of character rows in the terminal|8|
-|\-\-term-width|The number of character columns in the terminal|12|
-|\-\-offset|The global offset of the program in memory|0|
-|\-\-symbols|The file to store the symbol table in JSON format (requires dkjson)|N/A|
-|\-\-breakpoints|The list of line numbers to place breakpoints in the program|"[]"|
-
-  
-
-This command should produce an assembly file. Keep track of the directory the file appears in and pass this file path to TPTASM using The Powder Toy's console (accessible via the keyboard shortcut "~" or the "C" icon in the GUI). Note that the R3 must be in the simulation area for the following command to work.
-
-  
-
-```bash
-
-tptasm("path/to/output.asm")
-
+cabal run -v0 exe:tptcc-hs -- input.c [--output output.asm] [--size total-memory-size] [--term-height terminal-rows] [--term-width terminal-cols] [--offset global-offset] [--symbols symbols.json] [--breakpoints "[5, 8, 13]"]
 ```
 
-  
+| Optional Argument | Description | Default |
+| - | - | - |
+| `--output` | Assembly output path | `<input-file-name>.asm` |
+| `--size` | Total memory size in words | `2048` |
+| `--term-height` | Terminal character rows | `8` |
+| `--term-width` | Terminal character columns | `12` |
+| `--offset` | Global memory offset | `0` |
+| `--symbols` | Symbol table JSON output path | unset |
+| `--breakpoints` | Source line breakpoint list | `[]` |
 
-Your compiled program should now be stored in the R3's memory. By turning decorations off, you can view the encoded FILT representation of your program. Now you can spark the start button (the rightmost button on the computer) and have it execute your program.
+Debug dump modes are available for compiler development:
 
-  
-  
+```bash
+cabal run -v0 exe:tptcc-hs -- --dump-tokens input.c
+cabal run -v0 exe:tptcc-hs -- --dump-ast input.c
+cabal run -v0 exe:tptcc-hs -- --dump-type-events input.c
+cabal run -v0 exe:tptcc-hs -- --dump-ir-globals input.c
+cabal run -v0 exe:tptcc-hs -- --dump-simple-tac input.c
+cabal run -v0 exe:tptcc-hs -- --dump-ssa input.c
+cabal run -v0 exe:tptcc-hs -- --dump-native-asm-optimized input.c
+cabal run -v0 exe:tptcc-hs -- --dump-native-asm-unoptimized input.c
+```
 
-#### If you encounter any problems during the compilation process, make sure to reach out to me on [TPT's discord](https://powdertoy.co.uk/Discussions/Thread/View.html?Thread=25871) where I have the username lithium404.
+# C Dialect Status
+
+The language is C89-like, plus a few practical extensions used by the examples, such as mixed declarations/statements and declarations in `for` initializers. It is not a conforming C89 implementation yet.
+
+Currently supported:
+
+- integer and character scalar code using `char`, `int`, `long`, `signed`, and `unsigned`
+- pointers, arrays, function calls, recursion, and function pointers
+- structs, unions, enums, member access with `.` and `->`
+- local, global, `static`, `register`, and `typedef` declarations
+- `if`, `else`, `while`, `do while`, `for`, `switch`, `case`, `default`, `break`, `continue`, and `return`
+- arithmetic, bitwise, logical, comparison, assignment, compound assignment, increment/decrement, casts, `sizeof`, ternary, and comma expressions
+- string and character literals with common escapes
+- inline `asm(...)` blocks for R3-specific code
+- SSA-based optimization and graph-colouring register allocation in the optimized pipeline
+
+Major C89 gaps:
+
+- no preprocessor: no `#include`, `#define`, conditional compilation, or macro expansion
+- no `extern` linkage model, separate compilation, or linker
+- no `const` or `volatile`
+- no `short`, floating-point types, floating constants, or floating arithmetic
+- no `goto` or labels
+- no old-style K&R function definitions, implicit `int`, or implicit function declarations
+- no true variadic call support or `stdarg`
+- no bitfields
+- incomplete and recursive struct declarations are limited
+- struct layout is word-slot based and does not model C alignment or padding
+- aggregate initialization is limited compared with C89
+- integer constant expressions are limited in places such as enum values, array sizes, and `case` labels
+- pointer semantics are incomplete: pointer subtraction, `void *`, null pointer constants, and strict object/function pointer rules are limited
+
+# Testing
+
+Run the emulator-backed C correctness suite with:
+
+```bash
+nix develop --command bash scripts/r3-correctness.sh
+```
+
+The suite compiles checked-in fixtures from `tests/r3-correctness/`, assembles them with the R3 toolchain, runs them in the emulator, and checks terminal output. The old all-in-one Lua/Haskell assembly equivalence script has been removed because optimized Haskell output intentionally diverges from the Lua backend.
 
 # Standard Library Documentation
 Many of the methods in this library have the prefix "`__`" which usually indicates that these methods are for the compiler's internal use. However, since a formal standard library is still being designed, these temporary methods can still be tremendously useful.
@@ -158,7 +176,7 @@ Reads a single entered character. Unlike `getchar()`, this function does not wai
 
 ---
 
-## `void __scan_unsigned_int(int* out)`
+## `void __scan_unsigned_int(int *out)`
 
 Reads an unsigned integer from the input and stores it in the provided integer
 
@@ -296,7 +314,7 @@ Uses 4 16 bit values to construct an 8x8 bitmap for the 0th character.
 
 ---
 
-## `void __print_char_array(char* str)`
+## `void __print_char_array(char *str)`
 
 Displays a null-terminated array of characters.
 
