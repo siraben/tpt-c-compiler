@@ -462,6 +462,10 @@ allocatedPhysicalRegister place
       case reads (placeValue place) of
         [(reg, "")] | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
+  | placeType place `elem` ["t", "pr", "vr"] =
+      case reads (placeValue place) of
+        [(reg, "")] | reg `elem` callerSafeRegisters -> Just reg
+        _ -> Nothing
   | otherwise = Nothing
 
 movePreferences :: [Instr] -> Map.Map Integer [Integer]
