@@ -16,6 +16,7 @@ import qualified Data.Set as Set
 import Tptcc.Ast (Node)
 import Tptcc.IRGlobal (GlobalInfo (..), generateIRGlobalInfo)
 import Tptcc.IRSimpleTac
+import Tptcc.SSA (lowerMethodSSA)
 import Tptcc.TypeChecker (includedStandardFunctions)
 
 data CodeGenOptions = CodeGenOptions
@@ -336,7 +337,9 @@ renderMethod options optimized method = do
     sourceLocalSize = methodOutputLocalSize method
     optimizedSource =
       if optimized
-        then promoteScalarLocals (methodOutputInstructions method)
+        then
+          methodOutputInstructions $
+            lowerMethodSSA method {methodOutputInstructions = promoteScalarLocals (methodOutputInstructions method)}
         else methodOutputInstructions method
     abstractLowered = map (lowerAbstract options sourceLocalSize) optimizedSource
     optimizedInstructions = optimizeInstructions optimizedSource
