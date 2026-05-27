@@ -11,6 +11,9 @@ module Tptcc.CType
   , struct
   , union
   , enum
+  , sizeof
+  , withMemberOffsets
+  , memberByName
   , sameTypeChain
   , renderType
   , renderTypePretty
@@ -78,6 +81,31 @@ union = UnionType
 
 enum :: String -> [String] -> CType
 enum = EnumType
+
+sizeof :: CType -> Integer
+sizeof ty =
+  case ty of
+    ArrayType len target -> len * sizeof target
+    StructType _ members' -> sum (map (sizeof . memberType) members')
+    UnionType _ members' -> maximum (0 : map (sizeof . memberType) members')
+    _ -> 1
+
+withMemberOffsets :: Bool -> [Member] -> [Member]
+withMemberOffsets isStruct members'
+  | isStruct = reverse (snd (foldl addStructMember (0, []) members'))
+  | otherwise = [member {memberOffset = Just 0} | member <- members']
+  where
+    addStructMember (offset, acc) member =
+      (offset + sizeof (memberType member), member {memberOffset = Just offset} : acc)
+
+memberByName :: String -> [Member] -> Maybe Member
+memberByName wanted =
+  go
+  where
+    go [] = Nothing
+    go (member : rest)
+      | memberName member == wanted = Just member
+      | otherwise = go rest
 
 sameTypeChain :: CType -> CType -> Bool -> Bool
 sameTypeChain lhs rhs allowLengthMismatch =

@@ -1,6 +1,7 @@
 module Tptcc.NodeFields
   ( boolFieldDefault
   , childNodes
+  , enumMemberValues
   , fieldIntDefault
   , fieldIntMaybe
   , fieldIntsDefault
@@ -80,3 +81,11 @@ firstJust :: [Maybe a] -> Maybe a
 firstJust [] = Nothing
 firstJust (Just value : _) = Just value
 firstJust (Nothing : values) = firstJust values
+
+enumMemberValues :: [Node] -> [(Node, Integer)]
+enumMemberValues =
+  reverse . snd . foldl assign (0, [])
+  where
+    assign (nextValue, values) member =
+      let value = fieldIntDefault "value" nextValue member
+       in (value + 1, (member, value) : values)

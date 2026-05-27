@@ -620,11 +620,24 @@ peephole options instrs =
           Instr "ldoffset" [("source", fieldPlace "source" nc), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" c)] [] : rest
       | instrType c == "mov" && instrType nc == "add" && fieldPlace "dest" c == fieldPlace "dest" nc && isVirtualRegister (fieldPlace "source" c) =
           Instr "add3" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" nc)] [] : rest
-      | instrType c == "mov" && instrType nc == "add" && fieldPlace "dest" c == fieldPlace "dest" nc && placeType (fieldPlace "source" c) == "i" && placeType (fieldPlace "source" nc) == "i" =
-          Instr "mov" [("source", Place "i" (show (placeInteger (fieldPlace "source" c) + placeInteger (fieldPlace "source" nc)))), ("dest", fieldPlace "dest" nc)] [] : rest
+      | instrType c == "mov"
+      , instrType nc == "add"
+      , fieldPlace "dest" c == fieldPlace "dest" nc
+      , placeType (fieldPlace "source" c) == "i"
+      , placeType (fieldPlace "source" nc) == "i"
+      , Just first <- placeIntegerMaybe (fieldPlace "source" c)
+      , Just second <- placeIntegerMaybe (fieldPlace "source" nc) =
+          Instr "mov" [("source", Place "i" (show (first + second))), ("dest", fieldPlace "dest" nc)] [] : rest
       | instrType c == "add" && fieldPlace "source" c == Place "i" "0" = acc
-      | instrType c == "add3" && instrType nc == "add" && fieldPlace "source" c == Place "r" "base_pointer" && placeType (fieldPlace "offset" c) == "i" && placeType (fieldPlace "source" nc) == "i" && fieldPlace "dest" c == fieldPlace "dest" nc =
-          Instr "add3" [("source", Place "r" "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place "i" (show (placeInteger (fieldPlace "offset" c) + placeInteger (fieldPlace "source" nc))))] [] : rest
+      | instrType c == "add3"
+      , instrType nc == "add"
+      , fieldPlace "source" c == Place "r" "base_pointer"
+      , placeType (fieldPlace "offset" c) == "i"
+      , placeType (fieldPlace "source" nc) == "i"
+      , fieldPlace "dest" c == fieldPlace "dest" nc
+      , Just offset <- placeIntegerMaybe (fieldPlace "offset" c)
+      , Just source <- placeIntegerMaybe (fieldPlace "source" nc) =
+          Instr "add3" [("source", Place "r" "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place "i" (show (offset + source)))] [] : rest
       | instrType c == "jmp" && instrType nc == "label" && fieldPlace "target" c == fieldPlace "target" nc = acc
       | instrType c == "mov" && instrType nc == "cmp" && fieldPlace "dest" c == fieldPlace "second" nc && placeType (fieldPlace "source" c) `elem` ["i", "g"] =
           Instr "cmp" [("first", fieldPlace "first" nc), ("second", cmpImmediate options (fieldPlace "source" c))] [] : rest
@@ -634,6 +647,12 @@ peephole options instrs =
     cmpImmediate opts place
       | placeType place == "g" = Place "i" (show (codeGenGlobalAddr opts + placeInteger place))
       | otherwise = place
+
+placeIntegerMaybe :: Place -> Maybe Integer
+placeIntegerMaybe place =
+  case reads (placeValue place) of
+    [(value, "")] -> Just value
+    _ -> Nothing
 
 finalizeOptimizedInstructions :: CodeGenOptions -> [Instr] -> [Instr]
 finalizeOptimizedInstructions options = go (8 :: Int)

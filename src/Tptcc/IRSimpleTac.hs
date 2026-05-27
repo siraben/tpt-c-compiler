@@ -8,7 +8,7 @@ module Tptcc.IRSimpleTac
   , TacProgram (..)
   ) where
 
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
 import Data.Foldable (for_, toList)
@@ -18,7 +18,7 @@ import Data.Sequence (Seq, (><), (|>))
 import qualified Data.Sequence as Seq
 
 import Tptcc.Ast
-import Tptcc.CType (CType (..), TypeKind (..))
+import Tptcc.CType (CType (..), Member (..), TypeKind (..), array, base, baseFromSpecifiers, enum, function, memberByName, pointer, sizeof, struct, union, withMemberOffsets)
 import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
@@ -30,6 +30,7 @@ data LocalInfo = LocalInfo
   , localInfoPointerLevel :: Integer
   , localInfoDimensions :: [Integer]
   , localInfoPointerToArray :: Bool
+  , localInfoType :: CType
   }
   deriving (Eq, Show)
 
@@ -37,6 +38,7 @@ data PostfixContext = PostfixContext
   { contextPointerLevel :: Integer
   , contextDimensions :: [Integer]
   , contextPointerToArray :: Bool
+  , contextType :: Maybe CType
   }
   deriving (Eq, Show)
 
@@ -57,6 +59,7 @@ data TacState = TacState
   , functionPlaces :: Map.Map String Place
   , functionReturns :: Map.Map String Bool
   , enumConstants :: Map.Map String Place
+  , typeTags :: Map.Map String CType
   , globals :: Map.Map String LocalInfo
   , locals :: Map.Map String LocalInfo
   , instructions :: Seq Instr
@@ -99,6 +102,7 @@ initialState requestedBreakpoints =
     , functionPlaces = Map.fromList defaultPlaces
     , functionReturns = Map.empty
     , enumConstants = Map.empty
+    , typeTags = Map.empty
     , globals = Map.empty
     , locals = Map.empty
     , instructions = Seq.empty
@@ -128,14 +132,16 @@ emitGlobalDeclaration declaration = do
   specifier <- fieldNode "specifier" declaration
   storage <- fieldNode "storage_class" specifier
   let storageKind = fieldStringDefault "kind" "auto" storage
+  declaredBase <- resolveTypeSpecifier =<< fieldNode "type_specifier" specifier
   unless (storageKind == "typedef") $ do
     declarators <- fieldNodeList "declarators" declaration
     forM_ declarators $ \declarator ->
       unless (hasBoolField "is_function" declarator) $ do
         let initializer = fieldNodeMaybe "initializer" declarator
         dimensions <- declaratorDimensionsWithInitializer initializer declarator
+        declaredTy <- buildDeclaratorType declarator declaredBase
         let pointerLevel = declaratorPointerLevel declarator
-            size = declaratorSlotSize dimensions
+            size = objectSlotSize dimensions declaredTy
             name = declaratorName declarator
         place <-
           if pointerLevel > 0 && initializerContainsDirectString initializer
@@ -143,7 +149,7 @@ emitGlobalDeclaration declaration = do
               _ <- nextGlobalSize (directInitializerStringLength initializer)
               nextGlobalSize 1
             else nextGlobalSize size
-        let info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator)
+        let info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
         modify' (\st -> st {globals = Map.insert name info (globals st)})
         unless (pointerLevel > 0 && initializerContainsDirectString initializer) $
           allocateNestedInitializerStrings pointerLevel dimensions initializer
@@ -153,9 +159,8 @@ collectEnumConstants :: Node -> TacM ()
 collectEnumConstants declaration =
   case enumSpecifierFromDeclaration declaration >>= fieldNodeMaybe "declaration" of
     Just enumDeclaration ->
-      forM_ (zip [(0 :: Integer) ..] (childNodes enumDeclaration)) $ \(index, member) -> do
+      forM_ (enumMemberValues (childNodes enumDeclaration)) $ \(member, value) -> do
         memberId <- fieldNode "id" member
-        let value = fieldIntDefault "value" index member
         modify' (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (show value)) (enumConstants st)})
     Nothing -> pure ()
 
@@ -249,9 +254,12 @@ emitStatement statement = do
 emitDeclaration :: Node -> TacM ()
 emitDeclaration declaration = do
   storageKind <- declarationStorageKind declaration
+  specifier <- fieldNode "specifier" declaration
+  declaredBase <- resolveTypeSpecifier =<< fieldNode "type_specifier" specifier
   declarators <- fieldNodeList "declarators" declaration
   forM_ declarators $ \declarator -> do
     dimensions <- declaratorDimensions declarator
+    declaredTy <- buildDeclaratorType declarator declaredBase
     let isRegisterLocal = storageKind == "register"
         pointerLevel = declaratorPointerLevel declarator
     place <-
@@ -260,9 +268,9 @@ emitDeclaration declaration = do
           unless (null dimensions || pointerLevel > 0) $
             throw "simple TAC cannot allocate aggregate register"
           nextVR
-        else nextLocalSize (declaratorSlotSize dimensions)
+        else nextLocalSize (objectSlotSize dimensions declaredTy)
     let name = declaratorName declarator
-        info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator)
+        info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
     modify' (\st -> st {locals = Map.insert name info (locals st)})
     case fieldNodeMaybe "initializer" declarator of
       Just initializer -> do
@@ -981,17 +989,41 @@ emitPostfixOps place context (op : rest) = do
       "--" -> do
         mutated <- emitPostfixMutation place "sub"
         pure (mutated, emptyPostfixContext)
+      "." -> do
+        (memberPlace, memberTy) <- emitMemberAccess place context op
+        pure (memberPlace, contextForType memberTy)
+      "->" -> do
+        dereferenced <- emitDereference place
+        (memberPlace, memberTy) <- emitMemberAccess dereferenced (context {contextType = dereferenceType <$> contextType context}) op
+        pure (memberPlace, contextForType memberTy)
       other -> throw ("simple TAC does not support postfix op: " <> other)
   emitPostfixOps nextPlace nextContext rest
 
+emitMemberAccess :: Place -> PostfixContext -> PostfixOp -> TacM (Place, CType)
+emitMemberAccess place context op = do
+  memberNode <- postfixNode op
+  memberName' <- fieldString "id" memberNode
+  structTy <- maybe (throw ("simple TAC cannot infer type for member access: " <> memberName')) pure (contextType context)
+  member <- maybe (throw ("missing member: " <> memberName')) pure (lookupMemberIn structTy memberName')
+  offset <- maybe (throw ("missing member offset: " <> memberName')) pure (memberOffset member)
+  memberPlace <- emitOffsetLValue (Place "i" (show offset)) place 1
+  pure (memberPlace, memberType member)
+
+lookupMemberIn :: CType -> String -> Maybe Member
+lookupMemberIn ty memberName' =
+  case ty of
+    StructType _ members' -> memberByName memberName' members'
+    UnionType _ members' -> memberByName memberName' members'
+    _ -> Nothing
+
 emitPointerIndexing :: Place -> Place -> Integer -> TacM Place
-emitPointerIndexing pointer indexer size
-  | placeType pointer == "vr" && (placeType indexer == "i" || (placeType indexer == "vr" && size == 1)) = do
+emitPointerIndexing pointerPlace indexer size
+  | placeType pointerPlace == "vr" && (placeType indexer == "i" || (placeType indexer == "vr" && size == 1)) = do
       pointerRegister <- nextPr
-      emit "add3" [("source", pointer), ("dest", pointerRegister), ("offset", scaledImmediate size indexer)]
+      emit "add3" [("source", pointerPlace), ("dest", pointerRegister), ("offset", scaledImmediate size indexer)]
       pure pointerRegister
   | otherwise = do
-      dereferenced <- emitDereference pointer
+      dereferenced <- emitDereference pointerPlace
       emitIndexing dereferenced indexer size
 
 emitIndexing :: Place -> Place -> Integer -> TacM Place
@@ -1317,8 +1349,8 @@ lookupLocal name = do
       case enumConstant of
         Just place -> pure place
         Nothing -> do
-          function <- Map.lookup name . functionPlaces <$> get
-          maybe (throw ("missing local: " <> name)) pure function
+          functionPlace <- Map.lookup name . functionPlaces <$> get
+          maybe (throw ("missing local: " <> name)) pure functionPlace
 
 lookupLocalInfo :: String -> TacM (Maybe LocalInfo)
 lookupLocalInfo name = do
@@ -1349,7 +1381,7 @@ postfixOps :: Node -> [PostfixOp]
 postfixOps node = [op | ChildPostfix op <- nodeChildren node]
 
 emptyPostfixContext :: PostfixContext
-emptyPostfixContext = PostfixContext 0 [] False
+emptyPostfixContext = PostfixContext 0 [] False Nothing
 
 primaryPostfixContext :: Node -> TacM PostfixContext
 primaryPostfixContext node =
@@ -1359,9 +1391,18 @@ primaryPostfixContext node =
       pure $
         maybe
           emptyPostfixContext
-          (\local -> PostfixContext (localInfoPointerLevel local) (localInfoDimensions local) (localInfoPointerToArray local))
+          (\local -> PostfixContext (localInfoPointerLevel local) (localInfoDimensions local) (localInfoPointerToArray local) (Just (localInfoType local)))
           info
     _ -> pure emptyPostfixContext
+
+contextForType :: CType -> PostfixContext
+contextForType ty =
+  PostfixContext
+    { contextPointerLevel = pointerLevelOf ty
+    , contextDimensions = dimensionsOf ty
+    , contextPointerToArray = False
+    , contextType = Just ty
+    }
 
 indexingElementSize :: PostfixContext -> Integer
 indexingElementSize context =
@@ -1375,11 +1416,34 @@ indexingElementSize context =
 afterIndexContext :: PostfixContext -> PostfixContext
 afterIndexContext context =
   if contextPointerToArray context
-    then context {contextPointerLevel = 0, contextPointerToArray = False}
+    then context {contextPointerLevel = 0, contextPointerToArray = False, contextType = contextType context >>= dereferenceTypeMaybe}
     else
       case contextDimensions context of
-        _ : rest -> context {contextDimensions = rest}
-        [] -> context {contextPointerLevel = max 0 (contextPointerLevel context - 1)}
+        _ : rest -> context {contextDimensions = rest, contextType = contextType context >>= dereferenceTypeMaybe}
+        [] -> context {contextPointerLevel = max 0 (contextPointerLevel context - 1), contextType = contextType context >>= dereferenceTypeMaybe}
+
+pointerLevelOf :: CType -> Integer
+pointerLevelOf ty =
+  case ty of
+    PointerType target -> 1 + pointerLevelOf target
+    _ -> 0
+
+dimensionsOf :: CType -> [Integer]
+dimensionsOf ty =
+  case ty of
+    ArrayType len target -> len : dimensionsOf target
+    _ -> []
+
+dereferenceTypeMaybe :: CType -> Maybe CType
+dereferenceTypeMaybe ty =
+  case ty of
+    PointerType target -> Just target
+    ArrayType _ target -> Just target
+    _ -> Nothing
+
+dereferenceType :: CType -> CType
+dereferenceType ty =
+  fromMaybe ty (dereferenceTypeMaybe ty)
 
 declaratorDimensions :: Node -> TacM [Integer]
 declaratorDimensions declarator = do
@@ -1403,6 +1467,113 @@ declaratorPointerToArray declarator =
   where
     directDeclarator = fieldNodeMaybe "direct_declarator" declarator
     nestedDeclarator = directDeclarator >>= fieldNodeMaybe "declarator"
+
+objectSlotSize :: [Integer] -> CType -> Integer
+objectSlotSize dimensions ty
+  | null dimensions = sizeof ty
+  | otherwise = declaratorSlotSize dimensions
+
+resolveTypeSpecifier :: Node -> TacM CType
+resolveTypeSpecifier typeSpecifier = do
+  case lookupField "kind" typeSpecifier of
+    Just (StringList specifiers) ->
+      if isBaseSpecifiers specifiers
+        then pure (baseFromSpecifiers specifiers)
+        else case specifiers of
+          name : _ -> maybe (throw ("missing typedef: " <> name)) pure . Map.lookup name . typeTags =<< get
+          [] -> throw "empty type specifier"
+    Just (NodeRef node)
+      | nodeName node == "STRUCT_OR_UNION_SPECIFIER" -> resolveStructOrUnion node
+      | nodeName node == "ENUM_SPECIFIER" -> resolveEnum node
+      | otherwise -> throw ("unexpected type specifier node: " <> nodeName node)
+    _ -> throw "invalid type specifier kind"
+
+resolveStructOrUnion :: Node -> TacM CType
+resolveStructOrUnion node = do
+  let isStruct = boolFieldDefault "is_struct" False node
+      typeName = maybe (if isStruct then "anon_struct" else "anon_union") identifierValue (fieldNodeMaybe "id" node)
+  case fieldNodeListMaybe "declaration" node of
+    Just declarations -> do
+      members' <- concat <$> mapM structDeclarationMembers declarations
+      let membersWithOffsets = withMemberOffsets isStruct members'
+          ty = if isStruct then struct typeName membersWithOffsets else typeName `union` membersWithOffsets
+      when (hasNodeField "id" node) $
+        modify' (\st -> st {typeTags = Map.insert typeName ty (typeTags st)})
+      pure ty
+    Nothing -> maybe (throw ("missing type tag: " <> typeName)) pure . Map.lookup typeName . typeTags =<< get
+
+structDeclarationMembers :: Node -> TacM [Member]
+structDeclarationMembers node = do
+  typeSpecifier <- fieldNode "type_specifier" node
+  memberBase <- resolveTypeSpecifier typeSpecifier
+  forM (childNodes node) $ \declarator -> do
+    memberTy <- buildDeclaratorType declarator memberBase
+    pure Member {memberName = declaratorName declarator, memberType = memberTy, memberOffset = Nothing}
+
+resolveEnum :: Node -> TacM CType
+resolveEnum node = do
+  identifier <- fieldNode "id" node
+  let name = identifierValue identifier
+  case fieldNodeMaybe "declaration" node of
+    Just declaration -> do
+      let members' = childNodes declaration
+      memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
+      forM_ (enumMemberValues members') $ \(member, value) -> do
+        memberId <- fieldNode "id" member
+        modify' (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (show value)) (enumConstants st)})
+      modify' (\st -> st {typeTags = Map.insert name (enum name memberNames) (typeTags st)})
+    Nothing -> pure ()
+  pure (base "INT")
+
+buildDeclaratorType :: Node -> CType -> TacM CType
+buildDeclaratorType declarator baseTy = do
+  direct <- fieldNode "direct_declarator" declarator
+  buildDirectDeclaratorType direct (applyPointers (fieldIntDefault "pointer_level" 0 declarator) baseTy)
+
+buildDirectDeclaratorType :: Node -> CType -> TacM CType
+buildDirectDeclaratorType direct ty = do
+  let withArrays = foldr array ty (fieldIntsDefault "dimensions" [] direct)
+  withFunction <-
+    case fieldNodeMaybe "parameter_list" direct of
+      Just params -> function withArrays <$> buildParameterListTypes params
+      Nothing -> pure withArrays
+  case fieldNodeMaybe "declarator" direct of
+    Just nested -> buildDeclaratorType nested withFunction
+    Nothing -> pure withFunction
+
+buildParameterListTypes :: Node -> TacM [CType]
+buildParameterListTypes params =
+  mapM buildParameterType (childNodes params)
+
+buildParameterType :: Node -> TacM CType
+buildParameterType parameter = do
+  typeSpecifier <- fieldNode "type_specifier" parameter
+  baseTy <- resolveTypeSpecifier typeSpecifier
+  case fieldNodeMaybe "declarator" parameter of
+    Just declarator -> decayArrayParameter <$> buildDeclaratorType declarator baseTy
+    Nothing -> pure baseTy
+
+applyPointers :: Integer -> CType -> CType
+applyPointers count ty
+  | count <= 0 = ty
+  | otherwise = applyPointers (count - 1) (pointer ty)
+
+decayArrayParameter :: CType -> CType
+decayArrayParameter ty =
+  case ty of
+    ArrayType _ target -> pointer target
+    _ -> ty
+
+isBaseSpecifiers :: [String] -> Bool
+isBaseSpecifiers specifiers =
+  case specifiers of
+    ["void"] -> True
+    ["char"] -> True
+    ["int"] -> True
+    ["long"] -> True
+    ["signed", _] -> True
+    ["unsigned", _] -> True
+    _ -> False
 
 declaratorDimensionsWithInitializer :: Maybe Node -> Node -> TacM [Integer]
 declaratorDimensionsWithInitializer initializer declarator = do
@@ -1516,12 +1687,16 @@ parameterPlaces declarator = do
   case fieldNodeMaybe "parameter_list" direct of
     Nothing -> pure []
     Just params ->
-      pure
-        [ (declaratorName paramDeclarator, LocalInfo (Place "p" (show index)) (declaratorPointerLevel paramDeclarator) [] (declaratorPointerToArray paramDeclarator))
-        | (index, param) <- zip [(0 :: Integer) ..] (childNodes params)
-        , Just paramDeclarator <- [fieldNodeMaybe "declarator" param]
-        , declaratorName paramDeclarator /= ""
-        ]
+      fmap concat $
+        forM (zip [(0 :: Integer) ..] (childNodes params)) $ \(index, param) ->
+          case fieldNodeMaybe "declarator" param of
+            Just paramDeclarator
+              | declaratorName paramDeclarator /= "" -> do
+                  typeSpecifier <- fieldNode "type_specifier" param
+                  baseTy <- resolveTypeSpecifier typeSpecifier
+                  declaredTy <- decayArrayParameter <$> buildDeclaratorType paramDeclarator baseTy
+                  pure [(declaratorName paramDeclarator, LocalInfo (Place "p" (show index)) (declaratorPointerLevel paramDeclarator) [] (declaratorPointerToArray paramDeclarator) declaredTy)]
+            _ -> pure []
 
 fieldString :: String -> Node -> TacM String
 fieldString name node =

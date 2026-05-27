@@ -146,7 +146,8 @@ checkStructOrUnion node = do
   case fieldNodeListMaybe "declaration" node of
     Just declarations -> do
       members' <- concat <$> mapM structDeclarationMembers declarations
-      let ty = if isStruct then struct typeName members' else typeName `union` members'
+      let membersWithOffsets = withMemberOffsets isStruct members'
+          ty = if isStruct then struct typeName membersWithOffsets else typeName `union` membersWithOffsets
       when (hasNodeField "id" node) $
         addSymbol Tag typeName (blankSymbol ty)
       recordType node ty
@@ -170,9 +171,8 @@ checkEnum node = do
     Just declaration -> do
       let members' = childNodes declaration
       memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
-      forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
+      forM_ (enumMemberValues members') $ \(memberNode, value) -> do
         memberId <- fieldNode "id" memberNode
-        let value = fromMaybe index (fieldIntMaybe "value" memberNode)
         addSymbol Ordinary (identifierValue memberId) (blankSymbol (base "INT")) {symbolPlace = Nothing}
         -- The event stream is type-oriented; enum values are represented by their symbol type.
         value `seq` pure ()
@@ -615,17 +615,13 @@ memberAccessType ty op =
   let memberName' = maybe "" identifierValue (postfixNodeValue op)
       memberTy =
         case ty of
-          StructType _ members' -> lookupMember memberName' members'
-          UnionType _ members' -> lookupMember memberName' members'
+          StructType _ members' -> memberType <$> memberByName memberName' members'
+          UnionType _ members' -> memberType <$> memberByName memberName' members'
           _ -> Nothing
    in case memberTy of
         Just (ArrayType _ target) -> pointer target
         Just found -> found
         Nothing -> ty
-
-lookupMember :: String -> [Member] -> Maybe CType
-lookupMember name members' =
-  firstJust [Just (memberType member) | member <- members', memberName member == name]
 
 dereferenceType :: CType -> CType
 dereferenceType ty =

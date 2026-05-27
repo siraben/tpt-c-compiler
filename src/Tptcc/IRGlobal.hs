@@ -8,7 +8,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 
 import Tptcc.Ast
@@ -234,7 +234,8 @@ resolveStructOrUnion node = do
   case fieldNodeListMaybe "declaration" node of
     Just declarations -> do
       members' <- concat <$> mapM structDeclarationMembers declarations
-      let ty = if isStruct then struct typeName members' else typeName `union` members'
+      let membersWithOffsets = withMemberOffsets isStruct members'
+          ty = if isStruct then struct typeName membersWithOffsets else typeName `union` membersWithOffsets
       when (hasNodeField "id" node) $
         upsertTag typeName IRSymbol {irSymbolType = ty, irSymbolPlace = Nothing, irSymbolPrototype = False}
       pure ty
@@ -256,9 +257,8 @@ resolveEnum node = do
     Just declaration -> do
       let members' = childNodes declaration
       memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
-      forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
+      forM_ (enumMemberValues members') $ \(memberNode, value) -> do
         memberId <- fieldNode "id" memberNode
-        let value = fromMaybe index (fieldIntMaybe "value" memberNode)
         upsertOrdinary
           (identifierValue memberId)
           IRSymbol
@@ -329,14 +329,6 @@ initializerElementType ty =
     StructType _ (member : _) -> memberType member
     UnionType _ (member : _) -> memberType member
     _ -> ty
-
-sizeof :: CType -> Integer
-sizeof ty =
-  case ty of
-    ArrayType len target -> len * sizeof target
-    StructType _ members' -> sum (map (sizeof . memberType) members')
-    UnionType _ members' -> maximum (0 : map (sizeof . memberType) members')
-    _ -> 1
 
 emitFunctionBody :: String -> Node -> Node -> IRM ()
 emitFunctionBody method declarator block = do
