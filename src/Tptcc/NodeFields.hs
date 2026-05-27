@@ -1,7 +1,6 @@
 module Tptcc.NodeFields
   ( boolFieldDefault
   , childNodes
-  , expectFieldNode
   , fieldIntDefault
   , fieldIntMaybe
   , fieldIntsDefault
@@ -30,12 +29,6 @@ fieldNodeMaybe name node =
   case lookupField name node of
     Just (NodeRef child) -> Just child
     _ -> Nothing
-
-expectFieldNode :: String -> Node -> Node
-expectFieldNode name node =
-  case fieldNodeMaybe name node of
-    Just child -> child
-    Nothing -> error ("missing node field '" <> name <> "' on " <> nodeName node)
 
 fieldNodeListMaybe :: String -> Node -> Maybe [Node]
 fieldNodeListMaybe name node =

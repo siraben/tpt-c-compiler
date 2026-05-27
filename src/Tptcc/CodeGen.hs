@@ -157,7 +157,7 @@ renderGlobalInstructions options optimized instructions = do
         (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
         pure (finalizeOptimizedInstructions options allocated)
       else pure abstractLowered
-  pure (concatMap (renderInstr options 0) lowered)
+  concat <$> mapM (renderInstr options 0) lowered
   where
     abstractLowered = map (lowerAbstract options 0) instructions
 
@@ -195,6 +195,7 @@ renderMethod options optimized method = do
       localRelease
         | frameLocalSize > 0 = "\tadd stack_pointer, " <> show frameLocalSize <> "\n"
         | otherwise = ""
+  renderedInstructions <- mapM (renderInstr options allocatedLocalSize) lowered
   pure $
     "__tptcc_fn_"
       <> methodOutputName method
@@ -202,7 +203,7 @@ renderMethod options optimized method = do
       <> localAllocation
       <> frameSetup
       <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
-      <> concatMap (renderInstr options allocatedLocalSize) lowered
+      <> concat renderedInstructions
       <> ".exit_"
       <> methodOutputName method
       <> ":\n"

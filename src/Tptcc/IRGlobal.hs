@@ -254,6 +254,7 @@ resolveEnum node = do
   case fieldNodeMaybe "declaration" node of
     Just declaration -> do
       let members' = childNodes declaration
+      memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
       forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
         memberId <- fieldNode "id" memberNode
         let value = maybe index id (fieldIntMaybe "value" memberNode)
@@ -264,7 +265,7 @@ resolveEnum node = do
             , irSymbolPlace = Just Place {placeType = "i", placeValue = show value}
             , irSymbolPrototype = False
             }
-      upsertTag name IRSymbol {irSymbolType = enum name (map (identifierValue . expectFieldNode "id") members'), irSymbolPlace = Nothing, irSymbolPrototype = False}
+      upsertTag name IRSymbol {irSymbolType = enum name memberNames, irSymbolPlace = Nothing, irSymbolPrototype = False}
     Nothing -> pure ()
   pure (base "INT")
 

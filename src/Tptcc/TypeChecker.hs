@@ -168,13 +168,14 @@ checkEnum node = do
   case fieldNodeMaybe "declaration" node of
     Just declaration -> do
       let members' = childNodes declaration
+      memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
       forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
         memberId <- fieldNode "id" memberNode
         let value = maybe index id (fieldIntMaybe "value" memberNode)
         addSymbol Ordinary (identifierValue memberId) (blankSymbol (base "INT")) {symbolPlace = Nothing}
         -- The event stream is type-oriented; enum values are represented by their symbol type.
         value `seq` pure ()
-      addSymbol Tag name (blankSymbol (enum name (map (identifierValue . expectFieldNode "id") members')))
+      addSymbol Tag name (blankSymbol (enum name memberNames))
     Nothing -> pure ()
   recordType node (base "INT")
 

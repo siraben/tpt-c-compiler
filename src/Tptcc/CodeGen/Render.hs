@@ -3,32 +3,61 @@ module Tptcc.CodeGen.Render (asReg, renderInstr) where
 import Tptcc.CodeGen.Options
 import Tptcc.Tac
 
-renderInstr :: CodeGenOptions -> Integer -> Instr -> String
+renderInstr :: CodeGenOptions -> Integer -> Instr -> Either String String
 renderInstr options localSize instr =
-  "\t" <> renderInstruction options localSize instr <> "\n"
+  (<> "\n") . ("\t" <>) <$> renderInstruction options localSize instr
 
-renderInstruction :: CodeGenOptions -> Integer -> Instr -> String
+renderInstruction :: CodeGenOptions -> Integer -> Instr -> Either String String
 renderInstruction options localSize instr =
   case instrType instr of
-    "call" -> "call " <> renderCallTarget (fieldPlace "target" instr)
-    "st" -> "st " <> asReg (fieldPlace "source" instr) <> ", " <> asMemory options localSize (fieldPlace "dest" instr)
-    "ld" -> "ld " <> asReg (fieldPlace "dest" instr) <> ", " <> asMemory options localSize (fieldPlace "source" instr)
-    "push" -> "push " <> asReg (fieldPlace "target" instr)
-    "pop" -> "pop " <> asReg (fieldPlace "target" instr)
-    "ret" -> "ret"
-    "label" -> placeValue (fieldPlace "target" instr) <> ":"
-    "cmp" -> "cmp " <> asReg (fieldPlace "first" instr) <> ", " <> renderImmediateOrReg (fieldPlace "second" instr)
-    "nop" -> "nop"
-    "add3" -> "add " <> asReg (fieldPlace "dest" instr) <> ", " <> renderImmediateOrReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "offset" instr)
-    "ldoffset" -> "ld " <> asReg (fieldPlace "dest" instr) <> ", " <> asReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "offset" instr)
-    "asm" -> fieldString "asm" instr
-    "mulh" -> "mulh " <> asReg (fieldPlace "dest" instr) <> ", " <> asReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "third" instr)
-    "mull3" -> "mul " <> asReg (fieldPlace "dest" instr) <> ", " <> asReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "third" instr)
-    "sub3" -> "sub " <> asReg (fieldPlace "dest" instr) <> ", " <> asReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "third" instr)
+    "call" -> ("call " <>) . renderCallTarget <$> requirePlace "target" instr
+    "st" -> renderBinary "source" "dest" (\source dest -> "st " <> asReg source <> ", " <> asMemory options localSize dest)
+    "ld" -> renderBinary "dest" "source" (\dest source -> "ld " <> asReg dest <> ", " <> asMemory options localSize source)
+    "push" -> ("push " <>) . asReg <$> requirePlace "target" instr
+    "pop" -> ("pop " <>) . asReg <$> requirePlace "target" instr
+    "ret" -> pure "ret"
+    "label" -> (<> ":") . placeValue <$> requirePlace "target" instr
+    "cmp" -> renderBinary "first" "second" (\first second -> "cmp " <> asReg first <> ", " <> renderImmediateOrReg second)
+    "nop" -> pure "nop"
+    "add3" -> renderTernary "dest" "source" "offset" (\dest source offset -> "add " <> asReg dest <> ", " <> renderImmediateOrReg source <> ", " <> renderImmediateOrReg offset)
+    "ldoffset" -> renderTernary "dest" "source" "offset" (\dest source offset -> "ld " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg offset)
+    "asm" -> requireString "asm" instr
+    "mulh" -> renderTernary "dest" "source" "third" (\dest source third -> "mulh " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    "mull3" -> renderTernary "dest" "source" "third" (\dest source third -> "mul " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    "sub3" -> renderTernary "dest" "source" "third" (\dest source third -> "sub " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
     ty
-      | take 1 ty == "j" -> ty <> " " <> placeValue (fieldPlace "target" instr)
-      | last ty == '3' -> take (length ty - 1) ty <> " " <> asReg (fieldPlace "dest" instr) <> ", " <> asReg (fieldPlace "source" instr) <> ", " <> renderImmediateOrReg (fieldPlace "third" instr)
-      | otherwise -> ty <> " " <> asReg (fieldPlace "dest" instr) <> ", " <> renderImmediateOrMemory options localSize (fieldPlace "source" instr)
+      | null ty -> Left "cannot render instruction with empty opcode"
+      | isJumpInstruction ty -> (\target -> ty <> " " <> placeValue target) <$> requirePlace "target" instr
+      | endsWith3 ty -> renderTernary "dest" "source" "third" (\dest source third -> take (length ty - 1) ty <> " " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+      | otherwise -> renderBinary "dest" "source" (\dest source -> ty <> " " <> asReg dest <> ", " <> renderImmediateOrMemory options localSize source)
+  where
+    renderBinary firstName secondName render = do
+      first <- requirePlace firstName instr
+      second <- requirePlace secondName instr
+      pure (render first second)
+
+    renderTernary firstName secondName thirdName render = do
+      first <- requirePlace firstName instr
+      second <- requirePlace secondName instr
+      third <- requirePlace thirdName instr
+      pure (render first second third)
+
+requirePlace :: String -> Instr -> Either String Place
+requirePlace name instr =
+  case lookup name (instrFields instr) of
+    Just place -> pure place
+    Nothing -> Left ("missing instruction field '" <> name <> "' for " <> instrType instr)
+
+requireString :: String -> Instr -> Either String String
+requireString name instr =
+  case lookup name (instrStringFields instr) of
+    Just value -> pure value
+    Nothing -> Left ("missing instruction string field '" <> name <> "' for " <> instrType instr)
+
+endsWith3 :: String -> Bool
+endsWith3 [] = False
+endsWith3 [char] = char == '3'
+endsWith3 (_ : rest) = endsWith3 rest
 
 renderCallTarget :: Place -> String
 renderCallTarget place

@@ -461,8 +461,14 @@ emitExpression node
   | nodeName node == "EXPRESSION" =
       case childNodes node of
         [] -> throw "simple TAC empty expression"
-        children -> last <$> mapM emitAssignmentExpression children
+        children -> emitExpressionChildren children
   | otherwise = emitAssignmentExpression node
+
+emitExpressionChildren :: [Node] -> TacM Place
+emitExpressionChildren [] = throw "simple TAC empty expression"
+emitExpressionChildren [child] = emitAssignmentExpression child
+emitExpressionChildren (child : children) =
+  emitAssignmentExpression child >> emitExpressionChildren children
 
 emitAssignmentExpression :: Node -> TacM Place
 emitAssignmentExpression node
@@ -657,17 +663,19 @@ emitComparisonControl jumpFor node trueLabel falseLabel = do
   case groups of
     [] -> emitConditionalResultJump tempPlace trueLabel falseLabel
     _ -> do
-      let (intermediate, finalGroup) = splitLast groups
-      forM_ intermediate $ \(op, rhs) -> do
-        nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
-        jumpType <- jumpFor op
-        emitConditionalEvaluation tempPlace nextReg tempPlace jumpType
-      let (op, rhs) = finalGroup
-      nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
-      jumpType <- jumpFor op
-      emit "cmp" [("first", tempPlace), ("second", nextReg)]
-      emit jumpType [("target", trueLabel)]
-      emit "jmp" [("target", falseLabel)]
+      case splitLast groups of
+        Nothing -> throw "malformed comparison expression"
+        Just (intermediate, finalGroup) -> do
+          forM_ intermediate $ \(op, rhs) -> do
+            nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
+            jumpType <- jumpFor op
+            emitConditionalEvaluation tempPlace nextReg tempPlace jumpType
+          let (op, rhs) = finalGroup
+          nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
+          jumpType <- jumpFor op
+          emit "cmp" [("first", tempPlace), ("second", nextReg)]
+          emit jumpType [("target", trueLabel)]
+          emit "jmp" [("target", falseLabel)]
 
 emitConditionalEvaluation :: Place -> Place -> Place -> String -> TacM ()
 emitConditionalEvaluation first second result jumpType = do
@@ -1537,12 +1545,13 @@ comparisonGroups (ChildToken token : ChildNode rhs : rest) =
   ((tokenName token, rhs) :) <$> comparisonGroups rest
 comparisonGroups _ = throw "malformed comparison expression"
 
-splitLast :: [a] -> ([a], a)
-splitLast [] = error "splitLast: empty list"
-splitLast [value] = ([], value)
+splitLast :: [a] -> Maybe ([a], a)
+splitLast [] = Nothing
+splitLast [value] = Just ([], value)
 splitLast (value : values) =
-  let (prefix, finalValue) = splitLast values
-   in (value : prefix, finalValue)
+  case splitLast values of
+    Just (prefix, finalValue) -> Just (value : prefix, finalValue)
+    Nothing -> Nothing
 
 equalityJump :: String -> TacM String
 equalityJump op =
