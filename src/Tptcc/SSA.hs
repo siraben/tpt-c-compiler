@@ -458,23 +458,28 @@ prependReversed values acc =
 
 renameInstruction :: (Place -> Bool) -> RenameState -> SSAInstr -> (SSAInstr, [Place], RenameState)
 renameInstruction ssaPlacePredicate state instr =
-  (instr {ssaInstrFields = reverse renamedFieldsRev}, reverse defsRev, stateAfterDefs)
+  (instr {ssaInstrFields = concatMap renameField (ssaInstrFields instr)}, defs, stateAfterDefs)
   where
     rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
-    useNames = ssaUseFieldNames rawInstr
-    defNames = ssaDefFieldNames rawInstr
-    (renamedFieldsRev, defsRev, stateAfterDefs) = foldl' renameField ([], [], state) (ssaInstrFields instr)
-    renameField (fields, defined, st) (name, place)
-      | ssaPlacePredicate base && name `elem` useNames && name `elem` defNames =
-          let usePlace = currentSSAPlace base st
-              (defPlace, st') = pushFresh base st
-           in ((name, defPlace) : (name <> "_in", usePlace) : fields, base : defined, st')
-      | ssaPlacePredicate base && name `elem` useNames =
-          ((name, currentSSAPlace base st) : fields, defined, st)
-      | ssaPlacePredicate base && name `elem` defNames =
+    useNames = Set.fromList (ssaUseFieldNames rawInstr)
+    defNames = Set.fromList (ssaDefFieldNames rawInstr)
+    (defPlaces, defs, stateAfterDefs) =
+      foldl' pushDef (Map.empty, [], state) (ssaInstrFields instr)
+    pushDef (places, defined, st) (name, place)
+      | ssaPlacePredicate base && name `Set.member` defNames =
           let (defPlace, st') = pushFresh base st
-           in ((name, defPlace) : fields, base : defined, st')
-      | otherwise = ((name, place) : fields, defined, st)
+           in (Map.insert name defPlace places, defined <> [base], st')
+      | otherwise = (places, defined, st)
+      where
+        base = ssaPlaceBase place
+    renameField (name, place)
+      | ssaPlacePredicate base && name `Set.member` useNames && name `Set.member` defNames =
+          [(name <> "_in", currentSSAPlace base state), (name, Map.findWithDefault place name defPlaces)]
+      | ssaPlacePredicate base && name `Set.member` useNames =
+          [(name, currentSSAPlace base state)]
+      | ssaPlacePredicate base && name `Set.member` defNames =
+          [(name, Map.findWithDefault place name defPlaces)]
+      | otherwise = [(name, place)]
       where
         base = ssaPlaceBase place
 
