@@ -4,7 +4,8 @@ module Tptcc.Parser
 
 import Control.Monad (unless, void, when)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, evalStateT, modify')
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, modify')
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Void (Void)
 import qualified Text.Megaparsec as MP
@@ -101,12 +102,15 @@ parseDeclarationSpecifier :: ParserM Node
 parseDeclarationSpecifier = do
   node <- emptyNode "DECLARATION_SPECIFIER"
   storageClass <- parseStorageClassSpecifier
+  qualifiersBefore <- parseTypeQualifiers
   typeSpecifier <- parseTypeSpecifier
+  qualifiersAfter <- parseTypeQualifiers
   pure
     node
       { nodeFields =
           [ NodeField "storage_class" (NodeRef storageClass)
           , NodeField "type_specifier" (NodeRef typeSpecifier)
+          , NodeField "qualifiers" (StringList (qualifiersBefore <> qualifiersAfter))
           ]
       }
 
@@ -123,7 +127,8 @@ parseStorageClassSpecifier = do
 parseTypeSpecifier :: ParserM Node
 parseTypeSpecifier = do
   node <- emptyNode "TYPE_SPECIFIER"
-  expectType "TYPE_SPECIFIER"
+  isType <- isTypeSpecifierStart
+  unless isType (failAtPeek "Expected TYPE_SPECIFIER")
   token <- peekToken
   case tokenString token of
     "struct" -> do
@@ -139,9 +144,19 @@ parseTypeSpecifier = do
       kinds <- gatherTypeKinds
       pure node {nodeFields = [NodeField "kind" (StringList kinds)]}
 
+parseTypeQualifiers :: ParserM [String]
+parseTypeQualifiers = do
+  hasQualifier <- check "TYPE_QUALIFIER"
+  if hasQualifier
+    then do
+      qualifier <- tokenString <$> nextToken
+      rest <- parseTypeQualifiers
+      pure (qualifier : rest)
+    else pure []
+
 gatherTypeKinds :: ParserM [String]
 gatherTypeKinds = do
-  isType <- check "TYPE_SPECIFIER"
+  isType <- isTypeSpecifierStart
   if isType
     then do
       value <- tokenString <$> nextToken
@@ -186,7 +201,8 @@ parseStructDeclarationLists = do
 parseStructDeclarationList :: ParserM Node
 parseStructDeclarationList = do
   node <- emptyNode "STRUCT_DECLARATION_LIST"
-  typeSpecifier <- parseTypeSpecifier
+  specifier <- parseDeclarationSpecifier
+  let typeSpecifier = specifierTypeNode specifier
   declarator <- parseDeclarator
   declarators <- parseMoreDeclarators
   pure node {nodeChildren = map ChildNode (declarator : declarators), nodeFields = [NodeField "type_specifier" (NodeRef typeSpecifier)]}
@@ -243,8 +259,8 @@ parseEnumMemberDeclaration = do
     ifM
       (accept "=")
       ( do
-          value <- tokenInteger <$> nextToken
-          pure [NodeField "value" (IntValue value)]
+          value <- parseConstantExpression
+          pure [NodeField "value" (NodeRef value)]
       )
       (pure [])
   pure node {nodeFields = [NodeField "id" (NodeRef identifier)] <> valueFields}
@@ -307,9 +323,9 @@ parseDimensions = do
     then do
       dimension <-
         ifM
-          (anyCheck ["INT", "UNSIGNED_INT"])
-          (tokenInteger <$> nextToken)
+          (check "]")
           (pure (-1))
+          (constantValue <$> parseConstantExpression)
       expect "]"
       rest <- parseDimensions
       pure (dimension : rest)
@@ -361,7 +377,8 @@ parseMoreParameters = do
 parseParameterDeclaration :: ParserM Node
 parseParameterDeclaration = do
   node <- emptyNode "PARAMETER_DECLARATION"
-  typeSpecifier <- parseTypeSpecifier
+  specifier <- parseDeclarationSpecifier
+  let typeSpecifier = specifierTypeNode specifier
   needsDeclarator <- not <$> anyCheck [",", ")"]
   declaratorFields <-
     if needsDeclarator
@@ -429,6 +446,10 @@ parseNonIfStatement = do
       declaration <- parseDeclaration
       expect ";"
       pure declaration
+    "TYPE_QUALIFIER" -> do
+      declaration <- parseDeclaration
+      expect ";"
+      pure declaration
     "STORAGE_CLASS" -> do
       declaration <- parseDeclaration
       expect ";"
@@ -444,6 +465,10 @@ parseNonIfStatement = do
     "SWITCH" -> parseSwitch
     "CASE" -> parseCase
     "DEFAULT" -> parseDefault
+    "GOTO" -> do
+      gotoNode <- parseGoto
+      expect ";"
+      pure gotoNode
     "BREAK" -> do
       node <- emptyNode "BREAK"
       expect "BREAK"
@@ -459,6 +484,21 @@ parseNonIfStatement = do
       expect ";"
       pure asmNode
     ";" -> nextToken >> emptyNode "EMPTY_STATEMENT"
+    "ID" -> do
+      isLabel <- checkAt 1 ":"
+      isTypedefDecl <- isTypedefNameToken token
+      if isLabel
+        then parseLabel
+        else
+          if isTypedefDecl
+            then do
+              declaration <- parseDeclaration
+              expect ";"
+              pure declaration
+            else do
+              expression <- parseExpression
+              expect ";"
+              pure expression
     _ -> do
       expression <- parseExpression
       expect ";"
@@ -550,10 +590,25 @@ parseCase :: ParserM Node
 parseCase = do
   node <- emptyNode "CASE"
   expect "CASE"
-  value <- parsePrimaryExpression
+  value <- parseConstantExpression
   expect ":"
   statement <- parseStatement
   pure node {nodeFields = [NodeField "value" (NodeRef value), NodeField "statement" (NodeRef statement)]}
+
+parseGoto :: ParserM Node
+parseGoto = do
+  node <- emptyNode "GOTO"
+  expect "GOTO"
+  target <- parseIdentifier
+  pure node {nodeFields = [NodeField "target" (NodeRef target)]}
+
+parseLabel :: ParserM Node
+parseLabel = do
+  node <- emptyNode "LABEL"
+  label <- parseIdentifier
+  expect ":"
+  statement <- parseStatement
+  pure node {nodeFields = [NodeField "label" (NodeRef label), NodeField "statement" (NodeRef statement)]}
 
 parseDefault :: ParserM Node
 parseDefault = do
@@ -831,7 +886,7 @@ parseOperandOnlyRest operators subParser childrenRev = do
 parseCastExpression :: ParserM Node
 parseCastExpression = do
   startsCast <- check "("
-  hasType <- checkAt 1 "TYPE_SPECIFIER"
+  hasType <- isTypeNameAt 1
   if startsCast && hasType
     then do
       node <- emptyNode "CAST_EXPRESSION"
@@ -853,7 +908,8 @@ parseCastExpression = do
 parseTypeName :: ParserM Node
 parseTypeName = do
   node <- emptyNode "TYPE_NAME"
-  typeSpecifier <- parseTypeSpecifier
+  specifier <- parseDeclarationSpecifier
+  let typeSpecifier = specifierTypeNode specifier
   declarator <- parseAbstractDeclarator
   pure node {nodeFields = [NodeField "type_specifier" (NodeRef typeSpecifier), NodeField "declarator" (NodeRef declarator)]}
 
@@ -891,7 +947,7 @@ parseDirectAbstractDeclaratorSuffixes = do
   hasArray <- accept "["
   if hasArray
     then do
-      value <- parseIntegerConstant
+      value <- parseConstantExpression
       expect "]"
       (restChildren, fields) <- parseDirectAbstractDeclaratorSuffixes
       pure (value : restChildren, fields)
@@ -905,11 +961,8 @@ parseDirectAbstractDeclaratorSuffixes = do
           pure (children, NodeField "parameter_list" (NodeRef params) : fields)
         else pure ([], [])
 
-parseIntegerConstant :: ParserM Node
-parseIntegerConstant = do
-  node <- emptyNode "INT"
-  value <- tokenInteger <$> nextToken
-  pure node {nodeFields = [NodeField "value" (IntValue value)]}
+parseConstantExpression :: ParserM Node
+parseConstantExpression = parseTernaryExpression
 
 parseUnaryExpression :: ParserM Node
 parseUnaryExpression = do
@@ -926,7 +979,7 @@ parseSizeofExpression = do
   expect "SIZEOF"
   child <-
     ifM
-      ((&&) <$> check "(" <*> checkAt 1 "TYPE_SPECIFIER")
+      ((&&) <$> check "(" <*> isTypeNameAt 1)
       ( do
           expect "("
           typeName <- parseTypeName
@@ -1105,6 +1158,31 @@ checkAt offset expected = do
     token : _ -> pure (tokenName token == expected)
     [] -> pure False
 
+isTypeSpecifierStart :: ParserM Bool
+isTypeSpecifierStart = do
+  token <- peekToken
+  case tokenName token of
+    "TYPE_SPECIFIER" -> pure True
+    "ID" -> isTypedefNameToken token
+    _ -> pure False
+
+isTypeNameAt :: Int -> ParserM Bool
+isTypeNameAt offset = do
+  tokens <- lift MP.getInput
+  case drop offset tokens of
+    token : _ ->
+      case tokenName token of
+        "TYPE_SPECIFIER" -> pure True
+        "TYPE_QUALIFIER" -> isTypeNameAt (offset + 1)
+        "ID" -> isTypedefNameToken token
+        _ -> pure False
+    [] -> pure False
+
+isTypedefNameToken :: Token -> ParserM Bool
+isTypedefNameToken token = do
+  typedefs <- parserTypedefs <$> get
+  pure (tokenName token == "ID" && Set.member (tokenString token) typedefs)
+
 accept :: String -> ParserM Bool
 accept expected = do
   matches <- check expected
@@ -1116,11 +1194,6 @@ expect expected = do
   token <- nextToken
   unless (tokenName token == expected) $
     failAt token ("Expected " <> expected)
-
-expectType :: String -> ParserM ()
-expectType expected = do
-  matches <- check expected
-  unless matches (failAtPeek ("Expected " <> expected))
 
 countWhile :: String -> ParserM Integer
 countWhile expected = do
@@ -1147,6 +1220,112 @@ tokenInteger token =
     ValueInt value -> value
     ValueString value -> read value
 
+constantValue :: Node -> Integer
+constantValue node =
+  case nodeName node of
+    "INT" -> intField "value" node
+    "CHARACTER" -> intField "value" node
+    "EXPRESSION" ->
+      case childNodesLocal node of
+        [child] -> constantValue child
+        children -> last (0 : map constantValue children)
+    "UNARY_EXPRESSION" ->
+      let child = nodeField "child" node
+       in case stringFieldDefaultLocal "operator" "" node of
+            "+" -> constantValue child
+            "-" -> negate (constantValue child)
+            "~" -> 65535 - constantValue child
+            "!" -> if constantValue child == 0 then 1 else 0
+            "SIZEOF" -> 1
+            _ -> constantValue child
+    "CAST_EXPRESSION" -> constantValue (nodeField "cast_expression" node)
+    "TERNARY" ->
+      if constantValue (nodeField "condition" node) /= 0
+        then constantValue (nodeField "true_case" node)
+        else constantValue (nodeField "false_case" node)
+    "LOGICAL_OR_EXPRESSION" -> boolInt (any ((/= 0) . constantValue) (childNodesLocal node))
+    "LOGICAL_AND_EXPRESSION" -> boolInt (all ((/= 0) . constantValue) (childNodesLocal node))
+    "INCLUSIVE_OR_EXPRESSION" -> foldl (.|.) 0 (map constantValue (childNodesLocal node))
+    "INCLUSIVE_XOR_EXPRESSION" -> foldl xorInteger 0 (map constantValue (childNodesLocal node))
+    "INCLUSIVE_AND_EXPRESSION" -> foldl1Safe (.&.) (map constantValue (childNodesLocal node))
+    "EQUALITY_EXPRESSION" -> compareChain node
+    "RELATIONAL_EXPRESSION" -> compareChain node
+    "SHIFT_EXPRESSION" -> evalInfix node
+    "SUM_EXPRESSION" -> evalInfix node
+    "MULTIPLICATIVE_EXPRESSION" -> evalInfix node
+    _ -> 0
+  where
+    boolInt True = 1
+    boolInt False = 0
+    intField name n =
+      case fieldByName name n of
+        [NodeField _ (IntValue value)] -> value
+        _ -> 0
+    nodeField name n =
+      case fieldByName name n of
+        [NodeField _ (NodeRef value)] -> value
+        _ -> n
+    childNodesLocal n = [child | ChildNode child <- nodeChildren n]
+    stringFieldDefaultLocal name fallback n =
+      fromMaybe fallback (stringField name n)
+    foldl1Safe _ [] = 0
+    foldl1Safe f (value : values) = foldl f value values
+    xorInteger a b = (a .|. b) - (a .&. b)
+    (.&.) = integerBitAnd
+    (.|.) = integerBitOr
+
+evalInfix :: Node -> Integer
+evalInfix node =
+  case nodeChildren node of
+    ChildNode firstNode : rest -> go (constantValue firstNode) rest
+    _ -> 0
+  where
+    go acc [] = acc
+    go acc (ChildToken op : ChildNode rhsNode : rest) =
+      let rhs = constantValue rhsNode
+          next =
+            case tokenName op of
+              "+" -> acc + rhs
+              "-" -> acc - rhs
+              "*" -> acc * rhs
+              "/" -> if rhs == 0 then 0 else acc `quot` rhs
+              "%" -> if rhs == 0 then 0 else acc `rem` rhs
+              "<<" -> acc * (2 ^ max 0 rhs)
+              ">>" -> acc `quot` (2 ^ max 0 rhs)
+              _ -> acc
+       in go next rest
+    go acc _ = acc
+
+compareChain :: Node -> Integer
+compareChain node =
+  case nodeChildren node of
+    ChildNode firstNode : rest -> go (constantValue firstNode) rest
+    _ -> 0
+  where
+    go _ [] = 1
+    go lhs (ChildToken op : ChildNode rhsNode : rest) =
+      let rhs = constantValue rhsNode
+          ok =
+            case tokenName op of
+              "==" -> lhs == rhs
+              "!=" -> lhs /= rhs
+              "<" -> lhs < rhs
+              "<=" -> lhs <= rhs
+              ">" -> lhs > rhs
+              ">=" -> lhs >= rhs
+              _ -> False
+       in if ok then go rhs rest else 0
+    go _ _ = 0
+
+integerBitAnd :: Integer -> Integer -> Integer
+integerBitAnd a b = sum [bit | bit <- bitValues, a `mod` (bit * 2) >= bit, b `mod` (bit * 2) >= bit]
+
+integerBitOr :: Integer -> Integer -> Integer
+integerBitOr a b = sum [bit | bit <- bitValues, a `mod` (bit * 2) >= bit || b `mod` (bit * 2) >= bit]
+
+bitValues :: [Integer]
+bitValues = take 16 (iterate (* 2) 1)
+
 directDeclaratorId :: Node -> Node
 directDeclaratorId node =
   case fieldByName "id" node of
@@ -1157,7 +1336,7 @@ parameterIsVoidOnly :: Node -> ParserM Bool
 parameterIsVoidOnly parameter =
   pure $
     case fieldByName "type_specifier" parameter of
-      [NodeField _ (NodeRef typeSpecifier)] -> stringListField "kind" typeSpecifier == Just ["void"]
+      [NodeField _ (NodeRef typeSpecifier)] -> stringListField "kind" typeSpecifier == Just ["void"] && not (hasField "declarator" parameter)
       _ -> False
 
 storageClassKind :: Node -> Maybe String
@@ -1165,6 +1344,12 @@ storageClassKind declarationSpecifier =
   case fieldByName "storage_class" declarationSpecifier of
     [NodeField _ (NodeRef storageClass)] -> stringField "kind" storageClass
     _ -> Nothing
+
+specifierTypeNode :: Node -> Node
+specifierTypeNode declarationSpecifier =
+  case fieldByName "type_specifier" declarationSpecifier of
+    [NodeField _ (NodeRef typeSpecifier)] -> typeSpecifier
+    _ -> declarationSpecifier
 
 hasBoolField :: String -> Node -> Bool
 hasBoolField name node =

@@ -24,6 +24,7 @@ import Data.Char (isAsciiLower)
 data TypeKind
   = Void
   | Char
+  | Short
   | Int
   | Long
   | Struct
@@ -59,10 +60,16 @@ baseWithSigned kind signed = BaseType {typeKind = baseKind kind, typeSigned = si
 
 baseFromSpecifiers :: [String] -> CType
 baseFromSpecifiers specifiers =
-  case specifiers of
-    [kind] -> base kind
-    [signedness, kind] -> baseWithSigned kind (map toUpperAscii signedness == "SIGNED")
-    _ -> error ("invalid type specifiers: " <> show specifiers)
+  baseWithSigned kind signed
+  where
+    normalized = map (map toUpperAscii) specifiers
+    signed = "UNSIGNED" `notElem` normalized
+    kind
+      | "VOID" `elem` normalized = "VOID"
+      | "CHAR" `elem` normalized = "CHAR"
+      | "SHORT" `elem` normalized = "SHORT"
+      | "LONG" `elem` normalized = "LONG"
+      | otherwise = "INT"
 
 pointer :: CType -> CType
 pointer = PointerType
@@ -184,6 +191,7 @@ baseKind kind =
   case map toUpperAscii kind of
     "VOID" -> Void
     "CHAR" -> Char
+    "SHORT" -> Short
     "INT" -> Int
     "LONG" -> Long
     "STRUCT" -> Struct
@@ -196,6 +204,7 @@ renderKind kind =
   case kind of
     Void -> "VOID"
     Char -> "CHAR"
+    Short -> "SHORT"
     Int -> "INT"
     Long -> "LONG"
     Struct -> "STRUCT"

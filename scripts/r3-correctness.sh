@@ -121,5 +121,6 @@ run_case struct-members "8" "" "optimized unoptimized"
 run_case union-members "6" "" "optimized unoptimized"
 run_case enum-switch "36" "" "optimized unoptimized"
 run_case feature-torture "7181"
+run_case c89-parity "22"
 
 echo "R3 C correctness suite passed"

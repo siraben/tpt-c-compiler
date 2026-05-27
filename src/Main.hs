@@ -14,6 +14,7 @@ import Tptcc.IRSimpleTac (dumpSimpleTac)
 import Tptcc.Lexer (lexC)
 import Tptcc.Operand (Operand (..), renderOperandValue)
 import qualified Tptcc.Parser as Parser
+import Tptcc.Preprocessor (preprocessFile)
 import Tptcc.SSA (dumpSSA)
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..), Token (..), TokenValue (..))
@@ -65,7 +66,7 @@ runCompiler args =
 
 runNativeCompiler :: CompileConfig -> IO ()
 runNativeCompiler config = do
-  source <- readFile (compileInput config)
+  source <- preprocessFile (compileInput config)
   case Parser.parse (lexC source) >>= dumpNativeAsmOptimizedWithOptions (compileOptions config) of
     Left err -> do
       putStrLn err
@@ -139,7 +140,7 @@ splitCommas value =
 
 dumpNativeAsmOptimizedEvents :: FilePath -> IO ()
 dumpNativeAsmOptimizedEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= dumpNativeAsmOptimized of
     Left err -> do
       putStrLn err
@@ -148,7 +149,7 @@ dumpNativeAsmOptimizedEvents input = do
 
 dumpNativeAsmUnoptimizedEvents :: FilePath -> IO ()
 dumpNativeAsmUnoptimizedEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= dumpNativeAsmUnoptimized of
     Left err -> do
       putStrLn err
@@ -157,7 +158,7 @@ dumpNativeAsmUnoptimizedEvents input = do
 
 dumpSimpleTacEvents :: FilePath -> IO ()
 dumpSimpleTacEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= dumpSimpleTac of
     Left err -> do
       putStrLn err
@@ -166,7 +167,7 @@ dumpSimpleTacEvents input = do
 
 dumpSSAEvents :: FilePath -> IO ()
 dumpSSAEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= dumpSSA of
     Left err -> do
       putStrLn err
@@ -175,7 +176,7 @@ dumpSSAEvents input = do
 
 dumpIRGlobalEvents :: FilePath -> IO ()
 dumpIRGlobalEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= dumpIRGlobals of
     Left err -> do
       putStrLn err
@@ -184,7 +185,7 @@ dumpIRGlobalEvents input = do
 
 dumpTypeEvents :: FilePath -> IO ()
 dumpTypeEvents input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) >>= TypeChecker.typeEvents of
     Left err -> do
       putStrLn err
@@ -193,7 +194,7 @@ dumpTypeEvents input = do
 
 dumpAst :: FilePath -> IO ()
 dumpAst input = do
-  source <- readFile input
+  source <- preprocessFile input
   case Parser.parse (lexC source) of
     Left err -> do
       putStrLn err
@@ -222,7 +223,7 @@ renderBool False = "false"
 
 dumpTokens :: FilePath -> IO ()
 dumpTokens input = do
-  source <- readFile input
+  source <- preprocessFile input
   mapM_ (putStrLn . renderToken) (lexC source)
 
 renderToken :: Token -> String

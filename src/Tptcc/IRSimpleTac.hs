@@ -134,26 +134,27 @@ emitGlobalDeclaration declaration = do
   let storageKind = fieldStringDefault "kind" "auto" storage
   declaredBase <- resolveTypeSpecifier =<< fieldNode "type_specifier" specifier
   unless (storageKind == "typedef") $ do
-    declarators <- fieldNodeList "declarators" declaration
-    forM_ declarators $ \declarator ->
-      unless (hasBoolField "is_function" declarator) $ do
-        let initializer = fieldNodeMaybe "initializer" declarator
-        dimensions <- declaratorDimensionsWithInitializer initializer declarator
-        declaredTy <- withArrayDimensions dimensions <$> buildDeclaratorType declarator declaredBase
-        let pointerLevel = declaratorPointerLevel declarator
-            size = objectSlotSize dimensions declaredTy
-            name = declaratorName declarator
-        place <-
-          if pointerLevel > 0 && initializerContainsDirectString initializer
-            then do
-              _ <- nextGlobalSize (directInitializerStringLength initializer)
-              nextGlobalSize 1
-            else nextGlobalSize size
-        let info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
-        modify' (\st -> st {globals = Map.insert name info (globals st)})
-        unless (pointerLevel > 0 && initializerContainsDirectString initializer) $
-          allocateNestedInitializerStrings pointerLevel dimensions initializer
-        maybe (pure ()) (simulateGlobalInitializer place) initializer
+    unless (storageKind == "extern") $ do
+      declarators <- fieldNodeList "declarators" declaration
+      forM_ declarators $ \declarator ->
+        unless (hasBoolField "is_function" declarator) $ do
+          let initializer = fieldNodeMaybe "initializer" declarator
+          dimensions <- declaratorDimensionsWithInitializer initializer declarator
+          declaredTy <- withArrayDimensions dimensions <$> buildDeclaratorType declarator declaredBase
+          let pointerLevel = declaratorPointerLevel declarator
+              size = objectSlotSize dimensions declaredTy
+              name = declaratorName declarator
+          place <-
+            if pointerLevel > 0 && initializerContainsDirectString initializer
+              then do
+                _ <- nextGlobalSize (directInitializerStringLength initializer)
+                nextGlobalSize 1
+              else nextGlobalSize size
+          let info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
+          modify' (\st -> st {globals = Map.insert name info (globals st)})
+          unless (pointerLevel > 0 && initializerContainsDirectString initializer) $
+            allocateNestedInitializerStrings pointerLevel dimensions initializer
+          maybe (pure ()) (simulateGlobalInitializer place) initializer
 
 collectEnumConstants :: Node -> TacM ()
 collectEnumConstants declaration =
@@ -246,6 +247,8 @@ emitStatement statement = do
     "SWITCH" -> emitSwitch child
     "CASE" -> emitCase child
     "DEFAULT" -> emitDefault child
+    "GOTO" -> emitGoto child
+    "LABEL" -> emitLabel child
     "ASM" -> emitAsm child
     "RETURN" -> emitReturn child
     "EMPTY_STATEMENT" -> pure ()
@@ -409,9 +412,9 @@ emitSwitch node = do
 
 emitCase :: Node -> TacM ()
 emitCase node = do
-  value <- fieldNode "value" node >>= emitPrimaryExpression
-  unless (placeType value == "i") $
-    throw "case values must be constants"
+  valueNode <- fieldNode "value" node
+  enumEnv <- map placeToConstant . Map.toList . enumConstants <$> get
+  let value = Place "i" (show (constantValue enumEnv valueNode))
   trueLabel <- nextLabel
   addCaseLabel value trueLabel
   emit "label" [("target", trueLabel)]
@@ -422,6 +425,19 @@ emitDefault node = do
   defaultLabel <- nextLabel
   setDefaultCaseLabel defaultLabel
   emit "label" [("target", defaultLabel)]
+  fieldNode "statement" node >>= emitStatement
+
+emitGoto :: Node -> TacM ()
+emitGoto node = do
+  target <- fieldNode "target" node
+  method <- currentMethodName <$> get
+  emit "jmp" [("target", Place "i" (methodLabel method (identifierValue target)))]
+
+emitLabel :: Node -> TacM ()
+emitLabel node = do
+  label <- fieldNode "label" node
+  method <- currentMethodName <$> get
+  emit "label" [("target", Place "i" (methodLabel method (identifierValue label)))]
   fieldNode "statement" node >>= emitStatement
 
 caseComparison :: Place -> (Place, Place) -> [Instr]
@@ -1582,10 +1598,14 @@ isBaseSpecifiers specifiers =
   case specifiers of
     ["void"] -> True
     ["char"] -> True
+    ["short"] -> True
+    ["short", "int"] -> True
     ["int"] -> True
     ["long"] -> True
     ["signed", _] -> True
     ["unsigned", _] -> True
+    ["signed", _, _] -> True
+    ["unsigned", _, _] -> True
     _ -> False
 
 declaratorDimensionsWithInitializer :: Maybe Node -> Node -> TacM [Integer]
@@ -1806,6 +1826,12 @@ defaultStandardFunctionTargets =
 
 defaultStandardFunctionTargetMap :: Map.Map String Bool
 defaultStandardFunctionTargetMap = Map.fromList defaultStandardFunctionTargets
+
+methodLabel :: String -> String -> String
+methodLabel method label = "." <> method <> "_" <> label
+
+placeToConstant :: (String, Place) -> (String, Integer)
+placeToConstant (name, place) = (name, placeInteger place)
 
 operandToPlace :: Operand -> Place
 operandToPlace operand =

@@ -25,6 +25,7 @@ executable tptcc-hs
     Tptcc.NodeFields
     Tptcc.Operand
     Tptcc.Parser
+    Tptcc.Preprocessor
     Tptcc.SSA
     Tptcc.SymbolTable
     Tptcc.Tac

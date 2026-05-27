@@ -63,31 +63,32 @@ The language is C89-like, plus a few practical extensions used by the examples, 
 
 Currently supported:
 
-- integer and character scalar code using `char`, `int`, `long`, `signed`, and `unsigned`
-- pointers, arrays, function calls, recursion, and function pointers
+- integer and character scalar code using `char`, `short`, `int`, `long`, `signed`, and `unsigned`
+- pointers, `void *`, arrays, function calls, recursion, and function pointers
 - structs, unions, enums, member access with `.` and `->`
-- local, global, `static`, `register`, and `typedef` declarations
-- `if`, `else`, `while`, `do while`, `for`, `switch`, `case`, `default`, `break`, `continue`, and `return`
+- local, global, `extern`, `static`, `register`, and `typedef` declarations
+- `const` and `volatile` qualifiers are accepted
+- `#include`, object-like and simple function-like `#define`, `#undef`, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif`
+- `if`, `else`, `while`, `do while`, `for`, `switch`, `case`, `default`, `break`, `continue`, `goto`, labels, and `return`
 - arithmetic, bitwise, logical, comparison, assignment, compound assignment, increment/decrement, casts, `sizeof`, ternary, and comma expressions
+- integer constant expressions in enum values, array sizes, and `case` labels
 - string and character literals with common escapes
 - inline `asm(...)` blocks for R3-specific code
 - SSA-based optimization and graph-colouring register allocation in the optimized pipeline
 
 Major C89 gaps:
 
-- no preprocessor: no `#include`, `#define`, conditional compilation, or macro expansion
-- no `extern` linkage model, separate compilation, or linker
-- no `const` or `volatile`
-- no `short`, floating-point types, floating constants, or floating arithmetic
-- no `goto` or labels
+- preprocessor support is intentionally small: no system include search path, token pasting, stringizing, predefined macros, or full expression evaluator
+- no separate compilation or linker
+- `const` and `volatile` are parsed but not enforced semantically
+- no floating-point types, floating constants, or floating arithmetic
 - no old-style K&R function definitions, implicit `int`, or implicit function declarations
 - no true variadic call support or `stdarg`
 - no bitfields
 - incomplete and recursive struct declarations are limited
 - struct layout is word-slot based and does not model C alignment or padding
 - aggregate initialization is limited compared with C89
-- integer constant expressions are limited in places such as enum values, array sizes, and `case` labels
-- pointer semantics are incomplete: pointer subtraction, `void *`, null pointer constants, and strict object/function pointer rules are limited
+- pointer semantics are still word-addressed and do not fully model strict object/function pointer rules
 
 # Testing
 

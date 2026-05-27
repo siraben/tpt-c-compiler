@@ -41,7 +41,7 @@ nextToken line column source =
 type Scanner = Int -> Int -> String -> Maybe (Token, Int, Int, String)
 
 storageClass :: Scanner
-storageClass = keywordPrefixToken ["auto", "register", "static", "typedef"] (const "STORAGE_CLASS") isAlphaNum
+storageClass = keywordPrefixToken ["auto", "extern", "register", "static", "typedef"] (const "STORAGE_CLASS") isAlphaNum
 
 keywordPrefixToken :: [String] -> (String -> String) -> (Char -> Bool) -> Scanner
 keywordPrefixToken wordsToMatch nameOf continuation line column source =
@@ -134,16 +134,21 @@ keywordTokenNames =
     , ("return", "RETURN")
     , ("break", "BREAK")
     , ("continue", "CONTINUE")
+    , ("goto", "GOTO")
     , ("switch", "SWITCH")
     , ("case", "CASE")
     , ("default", "DEFAULT")
     , ("asm", "ASM")
     , ("auto", "STORAGE_CLASS")
+    , ("extern", "STORAGE_CLASS")
     , ("register", "STORAGE_CLASS")
     , ("static", "STORAGE_CLASS")
     , ("typedef", "STORAGE_CLASS")
+    , ("const", "TYPE_QUALIFIER")
+    , ("volatile", "TYPE_QUALIFIER")
     , ("int", "TYPE_SPECIFIER")
     , ("char", "TYPE_SPECIFIER")
+    , ("short", "TYPE_SPECIFIER")
     , ("void", "TYPE_SPECIFIER")
     , ("long", "TYPE_SPECIFIER")
     , ("unsigned", "TYPE_SPECIFIER")
@@ -269,7 +274,8 @@ decodeStringEscapes (c : rest) = c : decodeStringEscapes rest
 
 decodeCharacter :: String -> TokenValue
 decodeCharacter "'\\n'" = ValueInt 10
-decodeCharacter "'\\\\'" = ValueString "'\\'"
+decodeCharacter "'\\\\'" = ValueInt 92
+decodeCharacter [_, c, _] = ValueInt (fromIntegral (fromEnum c))
 decodeCharacter raw = ValueString raw
 
 parseInteger :: String -> Integer
@@ -373,4 +379,6 @@ tokenNames =
   , "ASM"
   , "~"
   , "DO"
+  , "TYPE_QUALIFIER"
+  , "GOTO"
   ]

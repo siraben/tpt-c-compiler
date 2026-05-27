@@ -87,12 +87,13 @@ buildDeclaration declaration = do
     maybe (pure ()) (void . checkTopInitializerFor declaredType) (fieldNodeMaybe "initializer" declarator)
     let name = declaratorName declarator
         isFunctionDefinition = hasBoolField "is_function" declaration && hasNodeField "block" declaration
+        isExternDeclaration = storageClassKind specifier == Just "extern"
         symbol =
           Symbol
             { symbolType = declaredType
             , symbolPlace = Nothing
             , symbolIsTypeName = False
-            , symbolIsPrototype = hasBoolField "is_function" declaration && not isFunctionDefinition
+            , symbolIsPrototype = isExternDeclaration || (hasBoolField "is_function" declaration && not isFunctionDefinition)
             }
     existing <- lookupSymbol Ordinary name
     case existing of
@@ -282,6 +283,10 @@ checkStatement statement = do
       _ <- checkPrimaryExpression =<< fieldNode "value" child
       checkStatement =<< fieldNode "statement" child
     "DEFAULT" -> checkStatement =<< fieldNode "statement" child
+    "GOTO" -> do
+      _ <- fieldNode "target" child
+      pure ()
+    "LABEL" -> checkStatement =<< fieldNode "statement" child
     "RETURN" -> maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "value" child)
     "EXPRESSION" -> void (checkExpression child)
     "ASM" -> checkAsm child
@@ -561,8 +566,11 @@ checkPrimaryExpression node =
 canCoerce :: CType -> CType -> Bool
 canCoerce ty target =
   case (ty, target) of
+    (PointerType (BaseType Void _), PointerType {}) -> True
+    (PointerType {}, PointerType (BaseType Void _)) -> True
     (PointerType a, PointerType b) -> canCoerce a b
     (ArrayType _ a, PointerType b) -> canCoerce a b
+    (BaseType Int _, PointerType {}) -> True
     (ArrayType la a, ArrayType lb b) -> (la <= lb || lb < 0) && canCoerce a b
     (FunctionType retA paramsA, FunctionType retB paramsB) ->
       canCoerce retA retB
@@ -683,10 +691,14 @@ isBaseSpecifiers specifiers =
   case specifiers of
     ["void"] -> True
     ["char"] -> True
+    ["short"] -> True
+    ["short", "int"] -> True
     ["int"] -> True
     ["long"] -> True
     ["signed", _] -> True
     ["unsigned", _] -> True
+    ["signed", _, _] -> True
+    ["unsigned", _, _] -> True
     ["SIGNED", _] -> True
     ["UNSIGNED", _] -> True
     _ -> False
@@ -822,6 +834,13 @@ fieldInts name node =
 declaratorName :: Node -> String
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
+
+storageClassKind :: Node -> Maybe String
+storageClassKind declarationSpecifier =
+  fieldNodeMaybe "storage_class" declarationSpecifier >>= \storage ->
+    case lookupField "kind" storage of
+      Just (StringValue value) -> Just value
+      _ -> Nothing
 
 requireName :: String -> Node -> TypeM ()
 requireName expected node =

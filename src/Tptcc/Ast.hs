@@ -131,6 +131,8 @@ nodeTypes =
     , "ASM_ARGUMENT"
     , "REGISTER_IDENTIFIER"
     , "REGISTER_IDENTIFIER_LIST"
+    , "GOTO"
+    , "LABEL"
     ]
     [1 ..]
 
