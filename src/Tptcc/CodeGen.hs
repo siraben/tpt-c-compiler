@@ -175,7 +175,7 @@ renderGlobalInstructions options optimized instructions = do
     if optimized
       then do
         (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
-        pure (peephole options allocated)
+        pure (finalizeOptimizedInstructions options allocated)
       else pure abstractLowered
   pure (concatMap (renderInstr options 0) lowered)
   where
@@ -293,7 +293,7 @@ renderMethod options optimized method = do
           else allocated
       lowered =
         if optimized
-          then optimizeMethodTail method (peephole options loweredAbstract)
+          then optimizeMethodTail method (finalizeOptimizedInstructions options loweredAbstract)
           else loweredAbstract
       usedRegisters = usedAllocatedRegisters lowered
       savedRegisters
@@ -670,12 +670,15 @@ isJumpInstruction :: String -> Bool
 isJumpInstruction ty = take 1 ty == "j"
 
 buildBlockUseDef :: BasicBlock -> BasicBlock
-buildBlockUseDef block =
+buildBlockUseDef = buildBlockUseDefWith instructionUseDef
+
+buildBlockUseDefWith :: (Instr -> (Set.Set Integer, Set.Set Integer)) -> BasicBlock -> BasicBlock
+buildBlockUseDefWith useDef block =
   block {blockUse = uses, blockDef = defs}
   where
     (_, uses, defs) = foldl' step (Set.empty, Set.empty, Set.empty) (map snd (blockCode block))
     step (seenDef, useAcc, defAcc) instr =
-      let (useSet, defSet) = instructionUseDef instr
+      let (useSet, defSet) = useDef instr
           newUses = Set.difference useSet seenDef
           newDefs = Set.difference defSet seenDef
        in (Set.union seenDef newDefs, Set.union useAcc newUses, Set.union defAcc newDefs)
@@ -1003,9 +1006,105 @@ peephole options instrs =
       | placeType place == "g" = Place "i" (show (codeGenGlobalAddr opts + placeInteger place))
       | otherwise = place
 
+finalizeOptimizedInstructions :: CodeGenOptions -> [Instr] -> [Instr]
+finalizeOptimizedInstructions options = go (8 :: Int)
+  where
+    step = eliminateDeadPhysicalWrites . peephole options . collapseAdjacentLabels
+    go 0 instrs = instrs
+    go fuel instrs =
+      let instrs' = step instrs
+       in if instrs' == instrs then instrs else go (fuel - 1) instrs'
+
+collapseAdjacentLabels :: [Instr] -> [Instr]
+collapseAdjacentLabels instrs =
+  map (rewriteLabelAliases aliases) kept
+  where
+    (aliases, keptRev, _) = foldl' step (Map.empty, [], Nothing) instrs
+    kept = reverse keptRev
+
+    step (aliasMap, out, previousLabel) instr
+      | instrType instr == "label" =
+          let target = fieldPlace "target" instr
+           in case previousLabel of
+                Just canonical ->
+                  (Map.insert (placeValue target) (placeValue canonical) aliasMap, out, previousLabel)
+                Nothing ->
+                  (aliasMap, instr : out, Just target)
+      | otherwise = (aliasMap, instr : out, Nothing)
+
+rewriteLabelAliases :: Map.Map String String -> Instr -> Instr
+rewriteLabelAliases aliases instr =
+  instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
+  where
+    rewritePlaceLabel place
+      | placeType place == "i" = place {placeValue = resolveLabelAlias aliases (placeValue place)}
+      | otherwise = place
+
+resolveLabelAlias :: Map.Map String String -> String -> String
+resolveLabelAlias aliases = go Set.empty
+  where
+    go seen label
+      | label `Set.member` seen = label
+      | Just next <- Map.lookup label aliases = go (Set.insert label seen) next
+      | otherwise = label
+
+eliminateDeadPhysicalWrites :: [Instr] -> [Instr]
+eliminateDeadPhysicalWrites instrs =
+  [instr | (_, instr) <- sortBy compareIndexedInstruction kept]
+  where
+    blocks =
+      sortBlocks $
+        livenessAnalysis $
+          map (buildBlockUseDefWith physicalInstructionUseDef) (buildBasicBlocks instrs)
+    kept = concatMap keepBlock blocks
+
+    keepBlock block =
+      snd $
+        foldr step (blockLiveOut block, []) (blockCode block)
+
+    step indexed@(_, instr) (live, keptInstrs)
+      | purePhysicalDefinition instr
+      , let (_, defs) = physicalInstructionUseDef instr
+      , Set.null (Set.intersection defs live) =
+          (live, keptInstrs)
+      | otherwise =
+          let (uses, defs) = physicalInstructionUseDef instr
+              live' = Set.union uses (Set.difference live defs)
+           in (live', indexed : keptInstrs)
+
+    compareIndexedInstruction (left, _) (right, _) = compare left right
+
+physicalInstructionUseDef :: Instr -> (Set.Set Integer, Set.Set Integer)
+physicalInstructionUseDef instr
+  | instrType instr == "asm" = (allAllocatable, allAllocatable)
+  | otherwise = (regSet (useFieldNames instr), regSet (defFieldNames instr))
+  where
+    allAllocatable = Set.fromList allocatableRegisters
+    regSet names =
+      Set.fromList
+        [ reg
+        | name <- names
+        , Just reg <- [physicalAllocatableRegister (fieldPlace name instr)]
+        ]
+
+purePhysicalDefinition :: Instr -> Bool
+purePhysicalDefinition instr =
+  pureRegisterDefinition instr
+    && case defFieldNames instr of
+      [name] -> physicalAllocatableRegister (fieldPlace name instr) /= Nothing
+      _ -> False
+
+physicalAllocatableRegister :: Place -> Maybe Integer
+physicalAllocatableRegister place
+  | placeType place == "r" =
+      case reads (placeValue place) of
+        [(reg, "")] | reg `elem` allocatableRegisters -> Just reg
+        _ -> Nothing
+  | otherwise = Nothing
+
 optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
-  removeTrailingDeadWrites . removeReturnRoundTrip . stripTrailingExitJump
+  removeTrailingDeadWrites . removeTrailingExitLabels . removeReturnRoundTrip . stripTrailingExitJump
   where
     exitTarget = Place "i" (".exit_" <> methodOutputName method)
 
@@ -1016,6 +1115,17 @@ optimizeMethodTail method =
               && fieldPlace "target" instr == exitTarget ->
               reverse rest
         _ -> instrs
+
+    removeTrailingExitLabels instrs =
+      case span isLabelInstruction (reverse instrs) of
+        ([], _) -> instrs
+        (labelsRev, restRev) ->
+          let aliases =
+                Map.fromList
+                  [ (placeValue (fieldPlace "target" label), placeValue exitTarget)
+                  | label <- labelsRev
+                  ]
+           in map (rewriteLabelAliases aliases) (reverse restRev)
 
 removeReturnRoundTrip :: [Instr] -> [Instr]
 removeReturnRoundTrip instrs =
@@ -1037,6 +1147,9 @@ trailingDeadWrite :: Instr -> Bool
 trailingDeadWrite instr =
   pureRegisterDefinition instr
     && maybe False isCallerSafePhysicalRegister (singleDefPlace instr)
+
+isLabelInstruction :: Instr -> Bool
+isLabelInstruction instr = instrType instr == "label"
 
 pureRegisterDefinition :: Instr -> Bool
 pureRegisterDefinition instr =
