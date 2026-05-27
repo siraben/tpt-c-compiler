@@ -428,42 +428,52 @@ renameBlock ssaPlacePredicate blockMap children blockId state0 =
        in (localDefs, popPlaces localDefs state5)
 
 renamePhiDefs :: RenameState -> [SSAPhi] -> ([SSAPhi], [Place], RenameState)
-renamePhiDefs state =
-  foldl'
-    ( \(phis, defs, st) phi ->
-        let (dest, st') = pushFresh (ssaPhiBase phi) st
-         in (phis <> [phi {ssaPhiDest = dest}], ssaPhiBase phi : defs, st')
-    )
-    ([], [], state)
+renamePhiDefs state phis =
+  let (phisRev, defsRev, state') =
+        foldl'
+          ( \(renamed, defs, st) phi ->
+              let (dest, st') = pushFresh (ssaPhiBase phi) st
+               in (phi {ssaPhiDest = dest} : renamed, ssaPhiBase phi : defs, st')
+          )
+          ([], [], state)
+          phis
+   in (reverse phisRev, reverse defsRev, state')
 
 renameInstructions :: (Place -> Bool) -> RenameState -> [(Int, SSAInstr)] -> ([(Int, SSAInstr)], [Place], RenameState)
-renameInstructions ssaPlacePredicate state =
-  foldl'
-    ( \(instrs, defs, st) (index, instr) ->
-        let (instr', instrDefs, st') = renameInstruction ssaPlacePredicate st instr
-         in (instrs <> [(index, instr')], defs <> instrDefs, st')
-    )
-    ([], [], state)
+renameInstructions ssaPlacePredicate state instrs =
+  let (instrsRev, defsRev, state') =
+        foldl'
+          ( \(renamed, defs, st) (index, instr) ->
+              let (instr', instrDefs, st') = renameInstruction ssaPlacePredicate st instr
+               in ((index, instr') : renamed, prependReversed instrDefs defs, st')
+          )
+          ([], [], state)
+          instrs
+   in (reverse instrsRev, reverse defsRev, state')
+
+prependReversed :: [a] -> [a] -> [a]
+prependReversed values acc =
+  foldl' (flip (:)) acc values
 
 renameInstruction :: (Place -> Bool) -> RenameState -> SSAInstr -> (SSAInstr, [Place], RenameState)
 renameInstruction ssaPlacePredicate state instr =
-  (instr {ssaInstrFields = renamedFields}, defs, stateAfterDefs)
+  (instr {ssaInstrFields = reverse renamedFieldsRev}, reverse defsRev, stateAfterDefs)
   where
     rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
     useNames = ssaUseFieldNames rawInstr
     defNames = ssaDefFieldNames rawInstr
-    (renamedFields, defs, stateAfterDefs) = foldl' renameField ([], [], state) (ssaInstrFields instr)
+    (renamedFieldsRev, defsRev, stateAfterDefs) = foldl' renameField ([], [], state) (ssaInstrFields instr)
     renameField (fields, defined, st) (name, place)
       | ssaPlacePredicate base && name `elem` useNames && name `elem` defNames =
           let usePlace = currentSSAPlace base st
               (defPlace, st') = pushFresh base st
-           in (fields <> [(name <> "_in", usePlace), (name, defPlace)], defined <> [base], st')
+           in ((name, defPlace) : (name <> "_in", usePlace) : fields, base : defined, st')
       | ssaPlacePredicate base && name `elem` useNames =
-          (fields <> [(name, currentSSAPlace base st)], defined, st)
+          ((name, currentSSAPlace base st) : fields, defined, st)
       | ssaPlacePredicate base && name `elem` defNames =
           let (defPlace, st') = pushFresh base st
-           in (fields <> [(name, defPlace)], defined <> [base], st')
-      | otherwise = (fields <> [(name, place)], defined, st)
+           in ((name, defPlace) : fields, base : defined, st')
+      | otherwise = ((name, place) : fields, defined, st)
       where
         base = ssaPlaceBase place
 

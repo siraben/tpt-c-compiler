@@ -18,6 +18,7 @@ import qualified Data.Sequence as Seq
 
 import Tptcc.Ast
 import Tptcc.CType (CType (..), TypeKind (..))
+import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..), Token (..))
@@ -1352,9 +1353,6 @@ childNodeAt wanted children =
 onlyChildNodeAt :: Int -> [NodeChild] -> TacM Node
 onlyChildNodeAt = childNodeAt
 
-childNodes :: Node -> [Node]
-childNodes node = [child | ChildNode child <- nodeChildren node]
-
 childNodesOnly :: Node -> [Node]
 childNodesOnly = childNodes
 
@@ -1525,12 +1523,6 @@ fieldNodeList name node =
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeMaybe :: String -> Node -> Maybe Node
-fieldNodeMaybe name node =
-  case lookupField name node of
-    Just (NodeRef child) -> Just child
-    _ -> Nothing
-
 parameterPlaces :: Node -> TacM [(String, LocalInfo)]
 parameterPlaces declarator = do
   direct <- fieldNode "direct_declarator" declarator
@@ -1550,12 +1542,6 @@ fieldString name node =
     Just (StringValue value) -> pure value
     _ -> throw ("missing string field '" <> name <> "' on " <> nodeName node)
 
-fieldStringDefault :: String -> String -> Node -> String
-fieldStringDefault name fallback node =
-  case lookupField name node of
-    Just (StringValue value) -> value
-    _ -> fallback
-
 characterValue :: Node -> String
 characterValue node =
   case lookupField "value" node of
@@ -1563,58 +1549,16 @@ characterValue node =
     Just (IntValue value) -> show value
     _ -> "0"
 
-fieldIntDefault :: String -> Integer -> Node -> Integer
-fieldIntDefault name fallback node =
-  case lookupField name node of
-    Just (IntValue value) -> value
-    _ -> fallback
-
-fieldIntsDefault :: String -> [Integer] -> Node -> [Integer]
-fieldIntsDefault name fallback node =
-  case lookupField name node of
-    Just (IntList values) -> values
-    _ -> fallback
-
-hasNodeField :: String -> Node -> Bool
-hasNodeField name node =
-  case lookupField name node of
-    Just (NodeRef _) -> True
-    _ -> False
-
-hasBoolField :: String -> Node -> Bool
-hasBoolField name node =
-  case lookupField name node of
-    Just (BoolValue True) -> True
-    _ -> False
-
-lookupField :: String -> Node -> Maybe NodeValue
-lookupField name node =
-  firstJust [Just value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
-
-identifierValue :: Node -> String
-identifierValue node = fieldStringDefault "id" (fieldStringDefault "value" "" node) node
-
 declaratorName :: Node -> String
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
 functionDeclarationReturnsValue :: Node -> Bool
 functionDeclarationReturnsValue declaration =
-  case fieldNodeMaybe "specifier" declaration >>= fieldNodeMaybePure "type_specifier" >>= lookupField "kind" of
+  case fieldNodeMaybe "specifier" declaration >>= fieldNodeMaybe "type_specifier" >>= lookupField "kind" of
     Just (StringList ["void"]) -> False
     Just (StringList ["VOID"]) -> False
     _ -> True
-
-fieldNodeMaybePure :: String -> Node -> Maybe Node
-fieldNodeMaybePure name node =
-  case lookupField name node of
-    Just (NodeRef child) -> Just child
-    _ -> Nothing
-
-firstJust :: [Maybe a] -> Maybe a
-firstJust [] = Nothing
-firstJust (Just value : _) = Just value
-firstJust (Nothing : values) = firstJust values
 
 comparisonGroups :: [NodeChild] -> TacM [(String, Node)]
 comparisonGroups [] = pure []

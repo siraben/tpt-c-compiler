@@ -11,6 +11,7 @@ import qualified Data.Map.Strict as Map
 
 import Tptcc.Ast
 import Tptcc.CType
+import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..))
@@ -649,12 +650,6 @@ fieldString name node =
     Just (StringValue value) -> pure value
     _ -> throw ("missing string field '" <> name <> "' on " <> nodeName node)
 
-fieldIntDefault :: String -> Integer -> Node -> Integer
-fieldIntDefault name fallback node =
-  case lookupField name node of
-    Just (IntValue value) -> value
-    _ -> fallback
-
 firstMaybe :: [a] -> Maybe a
 firstMaybe [] = Nothing
 firstMaybe (value : _) = Just value
@@ -795,9 +790,6 @@ renderNamespace :: Namespace -> String
 renderNamespace Ordinary = "o"
 renderNamespace Tag = "t"
 
-childNodes :: Node -> [Node]
-childNodes node = [child | ChildNode child <- nodeChildren node]
-
 field :: String -> Node -> TypeM NodeValue
 field name node =
   maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
@@ -808,29 +800,11 @@ fieldNode name node =
     Just (NodeRef child) -> pure child
     _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeMaybe :: String -> Node -> Maybe Node
-fieldNodeMaybe name node =
-  case lookupField name node of
-    Just (NodeRef child) -> Just child
-    _ -> Nothing
-
-expectFieldNode :: String -> Node -> Node
-expectFieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> child
-    _ -> error ("missing node field '" <> name <> "' on " <> nodeName node)
-
 fieldNodeList :: String -> Node -> TypeM [Node]
 fieldNodeList name node =
   case lookupField name node of
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
-
-fieldNodeListMaybe :: String -> Node -> Maybe [Node]
-fieldNodeListMaybe name node =
-  case lookupField name node of
-    Just (NodeList children) -> Just children
-    _ -> Nothing
 
 fieldInt :: String -> Node -> TypeM Integer
 fieldInt name node =
@@ -838,45 +812,11 @@ fieldInt name node =
     Just (IntValue value) -> pure value
     _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
 
-fieldIntMaybe :: String -> Node -> Maybe Integer
-fieldIntMaybe name node =
-  case lookupField name node of
-    Just (IntValue value) -> Just value
-    _ -> Nothing
-
 fieldInts :: String -> Node -> TypeM [Integer]
 fieldInts name node =
   case lookupField name node of
     Just (IntList values) -> pure values
     _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
-
-fieldStringDefault :: String -> String -> Node -> String
-fieldStringDefault name fallback node =
-  case lookupField name node of
-    Just (StringValue value) -> value
-    _ -> fallback
-
-boolFieldDefault :: String -> Bool -> Node -> Bool
-boolFieldDefault name fallback node =
-  case lookupField name node of
-    Just (BoolValue value) -> value
-    _ -> fallback
-
-hasBoolField :: String -> Node -> Bool
-hasBoolField name node = boolFieldDefault name False node
-
-hasNodeField :: String -> Node -> Bool
-hasNodeField name node =
-  case lookupField name node of
-    Just (NodeRef _) -> True
-    _ -> False
-
-lookupField :: String -> Node -> Maybe NodeValue
-lookupField name node =
-  firstJust [Just value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
-
-identifierValue :: Node -> String
-identifierValue node = fieldStringDefault "id" (fieldStringDefault "value" "" node) node
 
 declaratorName :: Node -> String
 declaratorName declarator =
@@ -886,11 +826,6 @@ requireName :: String -> Node -> TypeM ()
 requireName expected node =
   when (nodeName node /= expected) $
     throw ("expected " <> expected <> ", got " <> nodeName node)
-
-firstJust :: [Maybe a] -> Maybe a
-firstJust [] = Nothing
-firstJust (Just value : _) = Just value
-firstJust (Nothing : values) = firstJust values
 
 throw :: String -> TypeM a
 throw = lift . Left

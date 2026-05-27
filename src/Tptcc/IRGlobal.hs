@@ -12,6 +12,7 @@ import qualified Data.Map.Strict as Map
 
 import Tptcc.Ast
 import Tptcc.CType
+import Tptcc.NodeFields
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..))
 
@@ -607,9 +608,6 @@ upsertTag :: String -> IRSymbol -> IRM ()
 upsertTag name symbol =
   modify' (\st -> st {tagSymbols = Map.insert name symbol (tagSymbols st)})
 
-childNodes :: Node -> [Node]
-childNodes node = [child | ChildNode child <- nodeChildren node]
-
 field :: String -> Node -> IRM NodeValue
 field name node =
   maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
@@ -620,29 +618,11 @@ fieldNode name node =
     Just (NodeRef child) -> pure child
     _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeMaybe :: String -> Node -> Maybe Node
-fieldNodeMaybe name node =
-  case lookupField name node of
-    Just (NodeRef child) -> Just child
-    _ -> Nothing
-
-expectFieldNode :: String -> Node -> Node
-expectFieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> child
-    _ -> error ("missing node field '" <> name <> "' on " <> nodeName node)
-
 fieldNodeList :: String -> Node -> IRM [Node]
 fieldNodeList name node =
   case lookupField name node of
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
-
-fieldNodeListMaybe :: String -> Node -> Maybe [Node]
-fieldNodeListMaybe name node =
-  case lookupField name node of
-    Just (NodeList children) -> Just children
-    _ -> Nothing
 
 fieldInt :: String -> Node -> IRM Integer
 fieldInt name node =
@@ -650,57 +630,15 @@ fieldInt name node =
     Just (IntValue value) -> pure value
     _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
 
-fieldIntMaybe :: String -> Node -> Maybe Integer
-fieldIntMaybe name node =
-  case lookupField name node of
-    Just (IntValue value) -> Just value
-    _ -> Nothing
-
 fieldInts :: String -> Node -> IRM [Integer]
 fieldInts name node =
   case lookupField name node of
     Just (IntList values) -> pure values
     _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
 
-intFieldDefault :: String -> Integer -> Node -> Integer
-intFieldDefault name fallback node =
-  case lookupField name node of
-    Just (IntValue value) -> value
-    _ -> fallback
-
-fieldStringDefault :: String -> String -> Node -> String
-fieldStringDefault name fallback node =
-  case lookupField name node of
-    Just (StringValue value) -> value
-    _ -> fallback
-
-boolFieldDefault :: String -> Bool -> Node -> Bool
-boolFieldDefault name fallback node =
-  case lookupField name node of
-    Just (BoolValue value) -> value
-    _ -> fallback
-
-hasNodeField :: String -> Node -> Bool
-hasNodeField name node =
-  case lookupField name node of
-    Just (NodeRef _) -> True
-    _ -> False
-
-lookupField :: String -> Node -> Maybe NodeValue
-lookupField name node =
-  firstJust [Just value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
-
-identifierValue :: Node -> String
-identifierValue node = fieldStringDefault "id" (fieldStringDefault "value" "" node) node
-
 declaratorName :: Node -> String
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
-
-firstJust :: [Maybe a] -> Maybe a
-firstJust [] = Nothing
-firstJust (Just value : _) = Just value
-firstJust (Nothing : values) = firstJust values
 
 throw :: String -> IRM a
 throw = lift . Left

@@ -18,6 +18,7 @@ executable tptcc-hs
     Tptcc.IRGlobal
     Tptcc.IRSimpleTac
     Tptcc.Lexer
+    Tptcc.NodeFields
     Tptcc.Operand
     Tptcc.Parser
     Tptcc.SSA
