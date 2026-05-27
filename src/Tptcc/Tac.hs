@@ -15,6 +15,7 @@ module Tptcc.Tac
   ) where
 
 import qualified Data.Set as Set
+import Data.Maybe (fromMaybe)
 
 data Place = Place
   { placeType :: String
@@ -51,9 +52,7 @@ fieldPlace name instr =
 
 fieldString :: String -> Instr -> String
 fieldString name instr =
-  case lookup name (instrStringFields instr) of
-    Just value -> value
-    Nothing -> ""
+  fromMaybe "" (lookup name (instrStringFields instr))
 
 isJumpInstruction :: String -> Bool
 isJumpInstruction ty = take 1 ty == "j"

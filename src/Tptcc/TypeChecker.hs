@@ -3,10 +3,11 @@ module Tptcc.TypeChecker
   , typeEvents
   ) where
 
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
 import Data.List (sortOn)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 
 import Tptcc.Ast
@@ -83,7 +84,7 @@ buildDeclaration declaration = do
   forM_ declarators $ \declarator -> do
     declaredType <- adjustInitializerType declarator =<< buildDeclarator declarator baseType
     _ <- recordType declarator declaredType
-    maybe (pure ()) (fmap (const ()) . checkTopInitializerFor declaredType) (fieldNodeMaybe "initializer" declarator)
+    maybe (pure ()) (void . checkTopInitializerFor declaredType) (fieldNodeMaybe "initializer" declarator)
     let name = declaratorName declarator
         isFunctionDefinition = hasBoolField "is_function" declaration && hasNodeField "block" declaration
         symbol =
@@ -145,7 +146,7 @@ checkStructOrUnion node = do
   case fieldNodeListMaybe "declaration" node of
     Just declarations -> do
       members' <- concat <$> mapM structDeclarationMembers declarations
-      let ty = if isStruct then struct typeName members' else union typeName members'
+      let ty = if isStruct then struct typeName members' else typeName `union` members'
       when (hasNodeField "id" node) $
         addSymbol Tag typeName (blankSymbol ty)
       recordType node ty
@@ -171,7 +172,7 @@ checkEnum node = do
       memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
       forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
         memberId <- fieldNode "id" memberNode
-        let value = maybe index id (fieldIntMaybe "value" memberNode)
+        let value = fromMaybe index (fieldIntMaybe "value" memberNode)
         addSymbol Ordinary (identifierValue memberId) (blankSymbol (base "INT")) {symbolPlace = Nothing}
         -- The event stream is type-oriented; enum values are represented by their symbol type.
         value `seq` pure ()
@@ -277,8 +278,8 @@ checkStatement statement = do
       _ <- checkPrimaryExpression =<< fieldNode "value" child
       checkStatement =<< fieldNode "statement" child
     "DEFAULT" -> checkStatement =<< fieldNode "statement" child
-    "RETURN" -> maybe (pure ()) (fmap (const ()) . checkExpression) (fieldNodeMaybe "value" child)
-    "EXPRESSION" -> checkExpression child >> pure ()
+    "RETURN" -> maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "value" child)
+    "EXPRESSION" -> void (checkExpression child)
     "ASM" -> checkAsm child
     _ -> pure ()
 
@@ -289,11 +290,11 @@ checkFor node = do
   case fieldNodeMaybe "initialization" node of
     Just initialization
       | nodeName initialization == "DECLARATION" -> buildDeclaration initialization
-      | otherwise -> checkExpression initialization >> pure ()
+      | otherwise -> void (checkExpression initialization)
     Nothing -> pure ()
-  maybe (pure ()) (fmap (const ()) . checkExpression) (fieldNodeMaybe "condition" node)
+  maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "condition" node)
   checkStatement =<< fieldNode "statement" node
-  maybe (pure ()) (fmap (const ()) . checkExpression) (fieldNodeMaybe "update" node)
+  maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "update" node)
   exitScope
 
 checkAsm :: Node -> TypeM ()
@@ -303,7 +304,7 @@ checkAsm node = do
 
 checkAsmArgumentList :: Node -> TypeM ()
 checkAsmArgumentList node =
-  mapM_ checkAsmArgument (maybe [] id (fieldNodeListMaybe "arguments" node))
+  mapM_ checkAsmArgument (fromMaybe [] (fieldNodeListMaybe "arguments" node))
 
 checkAsmArgument :: Node -> TypeM ()
 checkAsmArgument node = do
@@ -341,7 +342,7 @@ initializerListType target childTypes =
     ArrayType {} -> target
     StructType {} -> target
     UnionType {} -> target
-    _ -> array (fromIntegral (length childTypes)) (maybe (base "VOID") id (firstMaybe childTypes))
+    _ -> array (fromIntegral (length childTypes)) (fromMaybe (base "VOID") (firstMaybe childTypes))
 
 checkExpression :: Node -> TypeM CType
 checkExpression node
@@ -392,7 +393,7 @@ checkEqualityExpression = checkBinaryIntNode "EQUALITY_EXPRESSION" checkRelation
 checkRelationalExpression :: Node -> TypeM CType
 checkRelationalExpression node
   | nodeName node == "RELATIONAL_EXPRESSION" = do
-      _ <- mapM checkShiftExpression (childNodes node)
+      mapM_ checkShiftExpression (childNodes node)
       recordType node (baseWithSigned "INT" True)
   | otherwise = checkShiftExpression node
 
@@ -417,7 +418,7 @@ checkSumExpression :: Node -> TypeM CType
 checkSumExpression node
   | nodeName node == "SUM_EXPRESSION" = do
       childTypes <- mapM checkTerm (childNodes node)
-      let ty = maybe (intFromSignedness childTypes) id (firstPointer childTypes)
+      let ty = fromMaybe (intFromSignedness childTypes) (firstPointer childTypes)
       recordType node ty
   | otherwise = checkTerm node
 
@@ -425,7 +426,7 @@ checkTerm :: Node -> TypeM CType
 checkTerm node
   | nodeName node == "MULTIPLICATIVE_EXPRESSION" = do
       childTypes <- mapM checkCastExpression (childNodes node)
-      recordType node (maybe (base "INT") id (firstMaybe childTypes))
+      recordType node (fromMaybe (base "INT") (firstMaybe childTypes))
   | otherwise = checkCastExpression node
 
 checkCastExpression :: Node -> TypeM CType
@@ -500,9 +501,8 @@ checkPostfixExpression node
   | otherwise = checkPrimaryExpression node
 
 foldPostfixOps :: CType -> [PostfixOp] -> TypeM CType
-foldPostfixOps ty [] = pure ty
-foldPostfixOps ty (op : ops) = do
-  nextTy <-
+foldPostfixOps =
+  foldM $ \ty op ->
     case postfixType op of
       "[" -> do
         _ <- maybe (pure (base "INT")) checkExpression (postfixNodeValue op)
@@ -521,7 +521,6 @@ foldPostfixOps ty (op : ops) = do
       "." -> pure (memberAccessType ty op)
       "->" -> pure (memberAccessType (dereferenceType ty) op)
       _ -> pure ty
-  foldPostfixOps nextTy ops
 
 checkArgumentList :: Node -> [CType] -> TypeM ()
 checkArgumentList arguments params = do
@@ -609,10 +608,7 @@ postfixNodeValue op =
 
 memberAccessType :: CType -> PostfixOp -> CType
 memberAccessType ty op =
-  let memberName' =
-        case postfixNodeValue op of
-          Just node -> identifierValue node
-          Nothing -> ""
+  let memberName' = maybe "" identifierValue (postfixNodeValue op)
       memberTy =
         case ty of
           StructType _ members' -> lookupMember memberName' members'

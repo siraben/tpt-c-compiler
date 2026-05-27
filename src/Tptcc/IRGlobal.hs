@@ -8,6 +8,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
 import Data.List (sortOn)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 
 import Tptcc.Ast
@@ -143,8 +144,8 @@ emitStaticInitializer target initializer start
   | nodeName initializer == "INITIALIZER" = do
       value <- fieldNode "value" initializer
       case nodeName value of
-        "INT" -> registerGlobalWord (intFieldDefault "value" 0 value) start
-        "CHARACTER" -> registerGlobalWord (intFieldDefault "value" 0 value) start
+        "INT" -> registerGlobalWord (fieldIntDefault "value" 0 value) start
+        "CHARACTER" -> registerGlobalWord (fieldIntDefault "value" 0 value) start
         "STRING_LITERAL" ->
           if isCharPointer target
             then do
@@ -233,7 +234,7 @@ resolveStructOrUnion node = do
   case fieldNodeListMaybe "declaration" node of
     Just declarations -> do
       members' <- concat <$> mapM structDeclarationMembers declarations
-      let ty = if isStruct then struct typeName members' else union typeName members'
+      let ty = if isStruct then struct typeName members' else typeName `union` members'
       when (hasNodeField "id" node) $
         upsertTag typeName IRSymbol {irSymbolType = ty, irSymbolPlace = Nothing, irSymbolPrototype = False}
       pure ty
@@ -257,7 +258,7 @@ resolveEnum node = do
       memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
       forM_ (zip [(0 :: Integer) ..] members') $ \(index, memberNode) -> do
         memberId <- fieldNode "id" memberNode
-        let value = maybe index id (fieldIntMaybe "value" memberNode)
+        let value = fromMaybe index (fieldIntMaybe "value" memberNode)
         upsertOrdinary
           (identifierValue memberId)
           IRSymbol
@@ -523,7 +524,7 @@ renderMethod (name, localSize) = "METHOD\t" <> name <> "\t" <> show localSize
 
 isUserGlobal :: (String, IRSymbol) -> Bool
 isUserGlobal (name, symbol) =
-  name `notElem` map fst defaultSymbols && irSymbolPlace symbol /= Nothing
+  name `notElem` map fst defaultSymbols && isJust (irSymbolPlace symbol)
 
 isBaseSpecifiers :: [String] -> Bool
 isBaseSpecifiers specifiers =

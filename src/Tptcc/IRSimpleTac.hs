@@ -8,10 +8,11 @@ module Tptcc.IRSimpleTac
   , TacProgram (..)
   ) where
 
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM_, unless, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
-import Data.Foldable (toList)
+import Data.Foldable (for_, toList)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq, (><), (|>))
 import qualified Data.Sequence as Seq
@@ -109,7 +110,7 @@ initialState requestedBreakpoints =
 emitProgram :: Node -> TacM ()
 emitProgram program = do
   let declarations = childNodes program
-      functionEntries = [(declaratorName declarator, declaration, declarator) | declaration <- declarations, Just declarator <- [fieldNodeMaybe "declarator" declaration], hasNodeField "block" declaration]
+      functionEntries = [(declaratorName declarator, declaration, declarator) | declaration <- declarations, hasNodeField "block" declaration, Just declarator <- [fieldNodeMaybe "declarator" declaration]]
       userFunctionPlaces = Map.fromList [(name, Place "i" ("__tptcc_fn_" <> name)) | (name, _, _) <- functionEntries]
       userFunctionReturns = Map.fromList [("__tptcc_fn_" <> name, functionDeclarationReturnsValue declaration) | (name, declaration, _) <- functionEntries]
   modify' (\st -> st {functionPlaces = Map.union userFunctionPlaces (functionPlaces st), functionReturns = Map.union userFunctionReturns (functionReturns st)})
@@ -229,7 +230,7 @@ emitStatement statement = do
   child <- fieldNode "child" statement
   case nodeName child of
     "DECLARATION" -> emitDeclaration child
-    "EXPRESSION" -> emitExpression child >> pure ()
+    "EXPRESSION" -> void (emitExpression child)
     "IF" -> emitIf child
     "BLOCK" -> emitBlock child
     "WHILE" -> emitWhile child
@@ -353,7 +354,7 @@ emitFor node = do
   emit "label" [("target", trueLabel)]
   fieldNode "statement" node >>= emitStatement
   emit "label" [("target", updateLabel)]
-  maybe (pure ()) (\update -> emitExpression update >> pure ()) (fieldNodeMaybe "update" node)
+  maybe (pure ()) (void . emitExpression) (fieldNodeMaybe "update" node)
   emit "jmp" [("target", startLabel)]
   emit "label" [("target", endLabel)]
   popLoopLabels
@@ -362,7 +363,7 @@ emitForInitialization :: Node -> TacM ()
 emitForInitialization node =
   case nodeName node of
     "DECLARATION" -> emitDeclaration node
-    _ -> emitExpression node >> pure ()
+    _ -> void (emitExpression node)
 
 emitSwitch :: Node -> TacM ()
 emitSwitch node = do
@@ -377,7 +378,7 @@ emitSwitch node = do
   let comparisons = concatMap (caseComparison condition) (caseEntries context)
       dispatch =
         comparisons
-          <> [ Instr "jmp" [("target", maybe endLabel id (caseDefault context))] []
+          <> [ Instr "jmp" [("target", fromMaybe endLabel (caseDefault context))] []
              ]
   insertInstructionsAt mark dispatch
   emit "label" [("target", endLabel)]
@@ -502,7 +503,7 @@ emitCompoundAssignment op lhs rhs = do
       else loadOperandIntoRegister rhs
   emit operationType [("source", rhsPlace), ("dest", lhsPlace)]
   unless (lhsPlace == lhs) $
-    emitMove lhsPlace lhs >> pure ()
+    void (emitMove lhsPlace lhs)
   pure lhsPlace
 
 emitTernaryExpression :: Node -> TacM Place
@@ -528,25 +529,25 @@ emitTernaryExpression node
 emitInclusiveOrExpression :: Node -> TacM Place
 emitInclusiveOrExpression node
   | nodeName node == "INCLUSIVE_OR_EXPRESSION" = do
-      firstNode <- onlyChildNodeAt 0 (nodeChildren node)
+      firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitInclusiveXorExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodesOnly node)) emitInclusiveXorExpression "or"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveXorExpression "or"
   | otherwise = emitInclusiveXorExpression node
 
 emitInclusiveXorExpression :: Node -> TacM Place
 emitInclusiveXorExpression node
   | nodeName node == "INCLUSIVE_XOR_EXPRESSION" = do
-      firstNode <- onlyChildNodeAt 0 (nodeChildren node)
+      firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitInclusiveAndExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodesOnly node)) emitInclusiveAndExpression "xor"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveAndExpression "xor"
   | otherwise = emitInclusiveAndExpression node
 
 emitInclusiveAndExpression :: Node -> TacM Place
 emitInclusiveAndExpression node
   | nodeName node == "INCLUSIVE_AND_EXPRESSION" = do
-      firstNode <- onlyChildNodeAt 0 (nodeChildren node)
+      firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitEqualityValue firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodesOnly node)) emitEqualityValue "and"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitEqualityValue "and"
   | otherwise = emitEqualityValue node
 
 emitEqualityValue :: Node -> TacM Place
@@ -611,7 +612,7 @@ emitBoolControlFlow node trueLabel falseLabel =
 emitLogicalAndControl :: Node -> Place -> Place -> TacM ()
 emitLogicalAndControl node trueLabel falseLabel
   | nodeName node == "LOGICAL_AND_EXPRESSION" =
-      case childNodesOnly node of
+      case childNodes node of
         [] -> throw "malformed logical and expression"
         children -> emitAndChain children
   | otherwise = emitBoolControlFlow node trueLabel falseLabel
@@ -627,7 +628,7 @@ emitLogicalAndControl node trueLabel falseLabel
 emitLogicalOrControl :: Node -> Place -> Place -> TacM ()
 emitLogicalOrControl node trueLabel falseLabel
   | nodeName node == "LOGICAL_OR_EXPRESSION" =
-      case childNodesOnly node of
+      case childNodes node of
         [] -> throw "malformed logical or expression"
         children -> emitOrChain children
   | otherwise = emitLogicalAndControl node trueLabel falseLabel
@@ -1329,12 +1330,6 @@ childNodeAt wanted children =
     ChildNode node : _ -> pure node
     _ -> throw "expected child node"
 
-onlyChildNodeAt :: Int -> [NodeChild] -> TacM Node
-onlyChildNodeAt = childNodeAt
-
-childNodesOnly :: Node -> [Node]
-childNodesOnly = childNodes
-
 postfixOps :: Node -> [PostfixOp]
 postfixOps node = [op | ChildPostfix op <- nodeChildren node]
 
@@ -1437,9 +1432,7 @@ directInitializerStringLength initializer =
 
 allocateNestedInitializerStrings :: Integer -> [Integer] -> Maybe Node -> TacM ()
 allocateNestedInitializerStrings pointerLevel dimensions initializer =
-  case initializer of
-    Just node -> allocateStringsInInitializer pointerLevel dimensions node
-    Nothing -> pure ()
+  for_ initializer (allocateStringsInInitializer pointerLevel dimensions)
 
 allocateStringsInInitializer :: Integer -> [Integer] -> Node -> TacM ()
 allocateStringsInInitializer pointerLevel dimensions initializer

@@ -279,7 +279,7 @@ dominanceFrontiers blocks idoms =
     addJoinBlock frontiers block
       | length (rawBlockPreds block) < 2 = frontiers
       | otherwise = foldl' (addPredFrontier (rawBlockId block)) frontiers (rawBlockPreds block)
-    addPredFrontier joinId frontiers predId = go frontiers predId
+    addPredFrontier joinId = go
       where
         stop = Map.lookup joinId idoms
         go acc runner
@@ -601,9 +601,9 @@ copyReplacements method =
     , ssaInstrType instr == "mov"
     , Just source <- [lookup "source" (ssaInstrFields instr)]
     , Just dest <- [lookup "dest" (ssaInstrFields instr)]
+    , source /= dest
     , Just _ <- [ssaReplacementKey source]
     , Just destKey <- [ssaReplacementKey dest]
-    , source /= dest
     ]
 
 isRemovedCopy :: Set.Set SSAPlaceKey -> SSAInstr -> Bool
@@ -883,9 +883,7 @@ ssaEdgeCopies placeMap method =
             let dest = lowerSSAPlace placeMap (ssaPhiDest phi)
                 source' = lowerSSAPlace placeMap source
                 copy =
-                  if source' == dest
-                    then []
-                    else [Instr "mov" [("source", source'), ("dest", dest)] []]
+                  [Instr "mov" [("source", source'), ("dest", dest)] [] | source' /= dest]
              in Map.insertWith (Map.unionWith (<>)) predId (Map.singleton succId copy) inner
         )
         acc
@@ -906,9 +904,7 @@ lowerSSAInstr placeMap instr =
         (Just source, Just dest) ->
           let source' = lowerSSAPlace placeMap source
               dest' = lowerSSAPlace placeMap dest
-           in if source' == dest'
-                then []
-                else [Instr "mov" [("source", source'), ("dest", dest')] []]
+           in [Instr "mov" [("source", source'), ("dest", dest')] [] | source' /= dest']
         _ -> []
 
 sanitizeBlockId :: String -> String

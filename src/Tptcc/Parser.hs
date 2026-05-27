@@ -2,7 +2,7 @@ module Tptcc.Parser
   ( parse
   ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, modify')
 import qualified Data.Set as Set
@@ -12,7 +12,7 @@ import qualified Text.Megaparsec as MP
 import Tptcc.Ast
 import Tptcc.Token
 
-data ParserState = ParserState
+newtype ParserState = ParserState
   { parserTypedefs :: Set.Set String
   }
   deriving (Eq, Show)
@@ -255,9 +255,7 @@ parseDeclarator = do
   pointerLevel <- countWhile "*"
   direct <- parseDirectDeclarator
   let functionFields =
-        if hasField "parameter_list" direct
-          then [NodeField "is_function" (BoolValue True)]
-          else []
+        [NodeField "is_function" (BoolValue True) | hasField "parameter_list" direct]
   pure
     node
       { nodeFields =
@@ -426,7 +424,7 @@ parseStatement = do
 parseNonIfStatement :: ParserM Node
 parseNonIfStatement = do
   token <- peekToken
-  case effectiveTokenName token of
+  case tokenName token of
     "TYPE_SPECIFIER" -> do
       declaration <- parseDeclaration
       expect ";"
@@ -649,7 +647,7 @@ parseRegisterIdentifier :: ParserM Node
 parseRegisterIdentifier = do
   node <- emptyNode "REGISTER_IDENTIFIER"
   token <- nextToken
-  unless (effectiveTokenName token == "ID") $
+  unless (tokenName token == "ID") $
     failAt token "Expected register identifier"
   pure node {nodePos = tokenPos token, nodeFields = [NodeField "id" (StringValue (tokenString token))]}
 
@@ -903,7 +901,7 @@ parseIntegerConstant = do
 parseUnaryExpression :: ParserM Node
 parseUnaryExpression = do
   token <- peekToken
-  case effectiveTokenName token of
+  case tokenName token of
     op | op `elem` ["++", "--"] -> parseUnaryWithChild "UNARY_EXPRESSION" (tokenString token) (nextToken >> parseUnaryExpression)
     "SIZEOF" -> parseSizeofExpression
     op | op `elem` ["&", "*", "+", "-", "~", "!"] -> parseUnaryWithChild "UNARY_EXPRESSION" (tokenString token) (nextToken >> parseCastExpression)
@@ -947,7 +945,7 @@ parsePostfixExpression = do
 parsePostfixOps :: ParserM [PostfixOp]
 parsePostfixOps = do
   token <- peekToken
-  case effectiveTokenName token of
+  case tokenName token of
     "[" -> do
       expect "["
       value <- parseExpression
@@ -975,7 +973,7 @@ parsePostfixOps = do
 parsePostfixSuffixOp :: ParserM [PostfixOp]
 parsePostfixSuffixOp = do
   token <- peekToken
-  case effectiveTokenName token of
+  case tokenName token of
     "++" -> nextToken >> pure [PostfixOp "++" Nothing]
     "--" -> nextToken >> pure [PostfixOp "--" Nothing]
     _ -> pure []
@@ -1004,7 +1002,7 @@ parseMoreArguments = do
 parsePrimaryExpression :: ParserM Node
 parsePrimaryExpression = do
   token <- peekToken
-  case effectiveTokenName token of
+  case tokenName token of
     "INT" -> do
       node <- emptyNode "INT"
       value <- tokenInteger <$> nextToken
@@ -1040,7 +1038,7 @@ parseIdentifier :: ParserM Node
 parseIdentifier = do
   node <- emptyNode "IDENTIFIER"
   token <- nextToken
-  unless (effectiveTokenName token == "ID") $
+  unless (tokenName token == "ID") $
     failAt token "Unexpected identifier"
   pure node {nodePos = tokenPos token, nodeFields = [NodeField "id" (StringValue (tokenString token))]}
 
@@ -1080,30 +1078,30 @@ nextToken = lift MP.anySingle
 check :: String -> ParserM Bool
 check expected = do
   token <- peekToken
-  pure (effectiveTokenName token == expected)
+  pure (tokenName token == expected)
 
 anyCheck :: [String] -> ParserM Bool
 anyCheck names = do
   token <- peekToken
-  pure (effectiveTokenName token `elem` names)
+  pure (tokenName token `elem` names)
 
 checkAt :: Int -> String -> ParserM Bool
 checkAt offset expected = do
   tokens <- lift MP.getInput
   case drop offset tokens of
-    token : _ -> pure (effectiveTokenName token == expected)
+    token : _ -> pure (tokenName token == expected)
     [] -> pure False
 
 accept :: String -> ParserM Bool
 accept expected = do
   matches <- check expected
-  when matches (nextToken >> pure ())
+  when matches (void nextToken)
   pure matches
 
 expect :: String -> ParserM ()
 expect expected = do
   token <- nextToken
-  unless (effectiveTokenName token == expected) $
+  unless (tokenName token == expected) $
     failAt token ("Expected " <> expected)
 
 expectType :: String -> ParserM ()
@@ -1123,9 +1121,6 @@ rememberTypedef declarator =
   case stringField "id" (directDeclaratorId declarator) <|> stringField "value" (directDeclaratorId declarator) of
     Just name -> modify' (\state -> state {parserTypedefs = Set.insert name (parserTypedefs state)})
     Nothing -> pure ()
-
-effectiveTokenName :: Token -> String
-effectiveTokenName = tokenName
 
 tokenString :: Token -> String
 tokenString token =

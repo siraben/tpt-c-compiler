@@ -3,8 +3,8 @@ module Tptcc.CodeGen.Stdlib (renderStandardLibrary) where
 import qualified Data.Map.Strict as Map
 
 renderStandardLibrary :: [String] -> String
-renderStandardLibrary names =
-  concatMap renderOne names
+renderStandardLibrary =
+  concatMap renderOne
   where
     renderOne name = maybe "" (substituteStdRegisters . stripInitialNewline) (Map.lookup name standardLibraryCode)
 
@@ -101,4 +101,3 @@ standardLibraryCode =
       , "\n__tptcc_fn_set_vrange:\n    ; %1 = start row, %2 = end row\n    shl %2, 5\n    add %2, %1\n    st %2, term_vrange\n    ret\n"
       )
     ]
-

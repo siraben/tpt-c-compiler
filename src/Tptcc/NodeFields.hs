@@ -11,11 +11,11 @@ module Tptcc.NodeFields
   , hasBoolField
   , hasNodeField
   , identifierValue
-  , intFieldDefault
   , lookupField
   ) where
 
 import Tptcc.Ast
+import Data.Maybe (fromMaybe)
 
 childNodes :: Node -> [Node]
 childNodes node = [child | ChildNode child <- nodeChildren node]
@@ -44,10 +44,7 @@ fieldIntMaybe name node =
 
 fieldIntDefault :: String -> Integer -> Node -> Integer
 fieldIntDefault name fallback node =
-  maybe fallback id (fieldIntMaybe name node)
-
-intFieldDefault :: String -> Integer -> Node -> Integer
-intFieldDefault = fieldIntDefault
+  fromMaybe fallback (fieldIntMaybe name node)
 
 fieldIntsDefault :: String -> [Integer] -> Node -> [Integer]
 fieldIntsDefault name fallback node =
@@ -68,7 +65,7 @@ boolFieldDefault name fallback node =
     _ -> fallback
 
 hasBoolField :: String -> Node -> Bool
-hasBoolField name node = boolFieldDefault name False node
+hasBoolField name = boolFieldDefault name False
 
 hasNodeField :: String -> Node -> Bool
 hasNodeField name node =

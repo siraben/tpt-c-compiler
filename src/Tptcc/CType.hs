@@ -16,6 +16,8 @@ module Tptcc.CType
   , renderTypePretty
   ) where
 
+import Data.Char (isAsciiLower)
+
 data TypeKind
   = Void
   | Char
@@ -177,5 +179,5 @@ renderKind kind =
 
 toUpperAscii :: Char -> Char
 toUpperAscii c
-  | c >= 'a' && c <= 'z' = toEnum (fromEnum c - 32)
+  | isAsciiLower c = toEnum (fromEnum c - 32)
   | otherwise = c

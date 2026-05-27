@@ -11,8 +11,8 @@ module Tptcc.CodeGen.Optimize
 
 import Control.Applicative ((<|>))
 import Control.Monad (foldM)
-import Data.List (find, sortBy)
-import Data.Maybe (listToMaybe)
+import Data.List (find, sort, sortBy)
+import Data.Maybe (isJust, listToMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -211,23 +211,7 @@ emptyBlock ident predIds succIds =
     }
 
 allocateRegisters :: [Instr] -> Either String ([Instr], [Integer])
-allocateRegisters tac =
-  allocateRegistersNoSpill tac
-
-allocateMethodRegisters :: Integer -> [Instr] -> Either String ([Instr], [Integer], Integer)
-allocateMethodRegisters baseLocalSize tac = go baseLocalSize tac
-  where
-    go nextSpillSlot currentTac =
-      case colourTac currentTac of
-        Right colours ->
-          let rewritten = map (rewriteInstrRegisters colours) currentTac
-              used = usedAllocatedRegisters rewritten
-           in pure (rewritten, used, nextSpillSlot)
-        Left reg ->
-          go (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (show nextSpillSlot)) currentTac)
-
-allocateRegistersNoSpill :: [Instr] -> Either String ([Instr], [Integer])
-allocateRegistersNoSpill tac = do
+allocateRegisters tac = do
   colours <- either allocationError pure (colourTac tac)
   let rewritten = map (rewriteInstrRegisters colours) tac
       used = usedAllocatedRegisters rewritten
@@ -238,6 +222,16 @@ allocateRegistersNoSpill tac = do
         "register allocation exhausted for virtual register "
           <> show reg
           <> ": all allocatable registers r1-r19 are live"
+
+allocateMethodRegisters :: Integer -> [Instr] -> Either String ([Instr], [Integer], Integer)
+allocateMethodRegisters nextSpillSlot currentTac =
+  case colourTac currentTac of
+    Right colours ->
+      let rewritten = map (rewriteInstrRegisters colours) currentTac
+          used = usedAllocatedRegisters rewritten
+       in pure (rewritten, used, nextSpillSlot)
+    Left reg ->
+      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (show nextSpillSlot)) currentTac)
 
 colourTac :: [Instr] -> Either Integer (Map.Map Integer Integer)
 colourTac tac =
@@ -373,8 +367,8 @@ computePerInstructionLiveness block =
        in (live', live : outAcc)
 
 buildInterferenceGraph :: [BasicBlock] -> Map.Map Integer (Set.Set Integer)
-buildInterferenceGraph blocks =
-  foldl' addBlock Map.empty blocks
+buildInterferenceGraph =
+  foldl' addBlock Map.empty
   where
     addBlock graph block =
       foldl' addInstr graph (zip (map snd (blockCode block)) (blockPerOut block))
@@ -406,7 +400,7 @@ colourGraph preferences order graph =
 
 luaIntegerPairsOrder :: [Integer] -> [Integer]
 luaIntegerPairsOrder keys =
-  sortBy compare arrayKeys <> sortBy compareLuaHash hashKeys
+  sort arrayKeys <> sortBy compareLuaHash hashKeys
   where
     arraySize = luaArraySize keys
     (arrayKeys, hashKeys) = spanLuaArrayKeys arraySize keys
@@ -722,7 +716,7 @@ purePhysicalDefinition :: Instr -> Bool
 purePhysicalDefinition instr =
   pureRegisterDefinition instr
     && case defFieldNames instr of
-      [name] -> physicalAllocatableRegister (fieldPlace name instr) /= Nothing
+      [name] -> isJust (physicalAllocatableRegister (fieldPlace name instr))
       _ -> False
 
 physicalAllocatableRegister :: Place -> Maybe Integer
@@ -804,10 +798,9 @@ isCallerSafePhysicalRegister place =
 
 instrTouchesFrame :: Instr -> Bool
 instrTouchesFrame instr =
-  any placeTouchesFrame (map snd (instrFields instr))
+  any (placeTouchesFrame . snd) (instrFields instr)
 
 placeTouchesFrame :: Place -> Bool
 placeTouchesFrame place =
   placeType place `elem` ["l", "p"]
     || place == Place "r" "base_pointer"
-

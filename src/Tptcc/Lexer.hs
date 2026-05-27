@@ -9,7 +9,7 @@ import Numeric (readHex)
 import Tptcc.Token
 
 lexC :: String -> [Token]
-lexC input = go 1 1 input
+lexC = go 1 1
   where
     go line column source =
       case dropSpaceAndComments line column source of
