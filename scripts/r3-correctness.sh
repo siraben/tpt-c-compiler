@@ -120,5 +120,6 @@ run_case function-pointers "53" "" "optimized unoptimized"
 run_case struct-members "8" "" "optimized unoptimized"
 run_case union-members "6" "" "optimized unoptimized"
 run_case enum-switch "36" "" "optimized unoptimized"
+run_case feature-torture "7181"
 
 echo "R3 C correctness suite passed"

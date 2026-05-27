@@ -139,7 +139,7 @@ emitGlobalDeclaration declaration = do
       unless (hasBoolField "is_function" declarator) $ do
         let initializer = fieldNodeMaybe "initializer" declarator
         dimensions <- declaratorDimensionsWithInitializer initializer declarator
-        declaredTy <- buildDeclaratorType declarator declaredBase
+        declaredTy <- withArrayDimensions dimensions <$> buildDeclaratorType declarator declaredBase
         let pointerLevel = declaratorPointerLevel declarator
             size = objectSlotSize dimensions declaredTy
             name = declaratorName declarator
@@ -258,8 +258,9 @@ emitDeclaration declaration = do
   declaredBase <- resolveTypeSpecifier =<< fieldNode "type_specifier" specifier
   declarators <- fieldNodeList "declarators" declaration
   forM_ declarators $ \declarator -> do
-    dimensions <- declaratorDimensions declarator
-    declaredTy <- buildDeclaratorType declarator declaredBase
+    let initializer = fieldNodeMaybe "initializer" declarator
+    dimensions <- declaratorDimensionsWithInitializer initializer declarator
+    declaredTy <- withArrayDimensions dimensions <$> buildDeclaratorType declarator declaredBase
     let isRegisterLocal = storageKind == "register"
         pointerLevel = declaratorPointerLevel declarator
     place <-
@@ -272,9 +273,9 @@ emitDeclaration declaration = do
     let name = declaratorName declarator
         info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
     modify' (\st -> st {locals = Map.insert name info (locals st)})
-    case fieldNodeMaybe "initializer" declarator of
-      Just initializer -> do
-        source <- emitInitializer initializer
+    case initializer of
+      Just initNode -> do
+        source <- emitInitializer initNode
         _ <- emitMove source place
         pure ()
       Nothing -> pure ()
@@ -1406,12 +1407,15 @@ contextForType ty =
 
 indexingElementSize :: PostfixContext -> Integer
 indexingElementSize context =
-  if contextPointerToArray context
-    then declaratorSlotSize (contextDimensions context)
-    else
-      case contextDimensions context of
-        _ : rest -> declaratorSlotSize rest
-        [] -> 1
+  maybe fallback sizeof (contextType context >>= dereferenceTypeMaybe)
+  where
+    fallback =
+      if contextPointerToArray context
+        then declaratorSlotSize (contextDimensions context)
+        else
+          case contextDimensions context of
+            _ : rest -> declaratorSlotSize rest
+            [] -> 1
 
 afterIndexContext :: PostfixContext -> PostfixContext
 afterIndexContext context =
@@ -1469,9 +1473,18 @@ declaratorPointerToArray declarator =
     nestedDeclarator = directDeclarator >>= fieldNodeMaybe "declarator"
 
 objectSlotSize :: [Integer] -> CType -> Integer
-objectSlotSize dimensions ty
-  | null dimensions = sizeof ty
-  | otherwise = declaratorSlotSize dimensions
+objectSlotSize dimensions ty =
+  sizeof (withArrayDimensions dimensions ty)
+
+withArrayDimensions :: [Integer] -> CType -> CType
+withArrayDimensions dimensions ty =
+  case (dimensions, ty) of
+    (dimension : rest, ArrayType _ target) -> ArrayType (normalizeDimension dimension) (withArrayDimensions rest target)
+    _ -> ty
+  where
+    normalizeDimension value
+      | value > 0 = value
+      | otherwise = 1
 
 resolveTypeSpecifier :: Node -> TacM CType
 resolveTypeSpecifier typeSpecifier = do

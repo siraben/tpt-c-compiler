@@ -564,6 +564,10 @@ canCoerce ty target =
     (PointerType a, PointerType b) -> canCoerce a b
     (ArrayType _ a, PointerType b) -> canCoerce a b
     (ArrayType la a, ArrayType lb b) -> (la <= lb || lb < 0) && canCoerce a b
+    (FunctionType retA paramsA, FunctionType retB paramsB) ->
+      canCoerce retA retB
+        && length paramsA == length paramsB
+        && and (zipWith canCoerce paramsA paramsB)
     (BaseType {}, BaseType {}) -> True
     (StructType ida _, StructType idb _) -> ida == idb
     (UnionType ida _, UnionType idb _) -> ida == idb
