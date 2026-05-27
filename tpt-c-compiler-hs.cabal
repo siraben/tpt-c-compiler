@@ -14,6 +14,10 @@ executable tptcc-hs
   other-modules:
     Tptcc.Ast
     Tptcc.CodeGen
+    Tptcc.CodeGen.Optimize
+    Tptcc.CodeGen.Options
+    Tptcc.CodeGen.Render
+    Tptcc.CodeGen.Stdlib
     Tptcc.CType
     Tptcc.IRGlobal
     Tptcc.IRSimpleTac
@@ -23,6 +27,7 @@ executable tptcc-hs
     Tptcc.Parser
     Tptcc.SSA
     Tptcc.SymbolTable
+    Tptcc.Tac
     Tptcc.Token
     Tptcc.TypeChecker
   build-depends:

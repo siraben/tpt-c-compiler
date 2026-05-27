@@ -14,15 +14,10 @@ import Tptcc.Ast
 import Tptcc.CType
 import Tptcc.NodeFields
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
+import Tptcc.Tac (Place (..), placeInteger)
 import Tptcc.Token (SourcePos (..))
 
 data Namespace = Ordinary | Tag
-  deriving (Eq, Show)
-
-data Place = Place
-  { placeType :: String
-  , placeValue :: String
-  }
   deriving (Eq, Show)
 
 data IRSymbol = IRSymbol
@@ -564,9 +559,6 @@ initializerHasStringValue node =
 
 stringLength :: Node -> Integer
 stringLength node = fromIntegral (length (fieldStringDefault "value" "" node)) + 1
-
-placeInteger :: Place -> Integer
-placeInteger = read . placeValue
 
 normalizePlaceValue :: Place -> String
 normalizePlaceValue place

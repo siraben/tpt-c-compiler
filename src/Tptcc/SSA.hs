@@ -6,13 +6,14 @@ module Tptcc.SSA
 import Control.Applicative ((<|>))
 import Data.List (isSuffixOf, sort, sortBy)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (listToMaybe)
 import qualified Data.Set as Set
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.String as PPString
 
 import Tptcc.Ast (Node)
-import Tptcc.IRSimpleTac (Instr (..), MethodOutput (..), Place (..), TacProgram (..), generateSimpleTac)
+import Tptcc.IRSimpleTac (generateSimpleTac)
+import Tptcc.Tac
 
 type BlockId = String
 
@@ -920,30 +921,6 @@ sanitizeBlockId =
     )
 
 
-isJumpInstruction :: String -> Bool
-isJumpInstruction ty = take 1 ty == "j"
-
-fieldPlace :: String -> Instr -> Place
-fieldPlace name instr =
-  fromMaybe (Place "i" "0") (lookup name (instrFields instr))
-
-uniqueInOrder :: Ord a => [a] -> [a]
-uniqueInOrder = go Set.empty
-  where
-    go _ [] = []
-    go seen (value : rest)
-      | value `Set.member` seen = go seen rest
-      | otherwise = value : go (Set.insert value seen) rest
-
-uniquePlaces :: [Place] -> [Place]
-uniquePlaces = go Set.empty
-  where
-    key place = (placeType place, placeValue place)
-    go _ [] = []
-    go seen (place : rest)
-      | key place `Set.member` seen = go seen rest
-      | otherwise = place : go (Set.insert (key place) seen) rest
-
 renderSSA :: SSAProgram -> [String]
 renderSSA =
   lines . PPString.renderString . PP.layoutPretty PP.defaultLayoutOptions . prettySSA
@@ -1030,10 +1007,6 @@ prettySSAPlace place =
 
 prettyPlace :: Place -> PP.Doc ann
 prettyPlace place = PP.pretty (placeType place) <> PP.pretty ":" <> PP.pretty (placeValue place)
-
-renderPlace :: Place -> String
-renderPlace =
-  PPString.renderString . PP.layoutPretty PP.defaultLayoutOptions . prettyPlace
 
 commaSepDocs :: [PP.Doc ann] -> PP.Doc ann
 commaSepDocs = PP.hcat . PP.punctuate (PP.pretty ",")

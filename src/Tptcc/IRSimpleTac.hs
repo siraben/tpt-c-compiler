@@ -21,34 +21,8 @@ import Tptcc.CType (CType (..), TypeKind (..))
 import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
+import Tptcc.Tac hiding (fieldString)
 import Tptcc.Token (SourcePos (..), Token (..))
-
-data Place = Place
-  { placeType :: String
-  , placeValue :: String
-  }
-  deriving (Eq, Show)
-
-data Instr = Instr
-  { instrType :: String
-  , instrFields :: [(String, Place)]
-  , instrStringFields :: [(String, String)]
-  }
-  deriving (Eq, Show)
-
-data MethodOutput = MethodOutput
-  { methodOutputName :: String
-  , methodOutputInstructions :: [Instr]
-  , methodOutputLocalSize :: Integer
-  }
-  deriving (Eq, Show)
-
-data TacProgram = TacProgram
-  { tacProgramMethods :: [MethodOutput]
-  , tacProgramGlobalSize :: Integer
-  , tacProgramGlobalInstructions :: [Instr]
-  }
-  deriving (Eq, Show)
 
 data LocalInfo = LocalInfo
   { localInfoPlace :: Place
@@ -1306,9 +1280,6 @@ renderField (name, place) = "\t" <> name <> "=" <> renderPlace place
 renderStringField :: (String, String) -> String
 renderStringField (name, value) = "\t" <> name <> "=" <> value
 
-renderPlace :: Place -> String
-renderPlace place = placeType place <> ":" <> placeValue place
-
 lookupLocal :: String -> TacM Place
 lookupLocal name = do
   found <- lookupLocalInfo name
@@ -1612,9 +1583,6 @@ isLogicalExpression node =
            , "RELATIONAL_EXPRESSION"
            , "EQUALITY_EXPRESSION"
            ]
-
-placeInteger :: Place -> Integer
-placeInteger = read . placeValue
 
 defaultPlaces :: [(String, Place)]
 defaultPlaces =
