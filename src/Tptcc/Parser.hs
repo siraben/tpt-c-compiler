@@ -1125,7 +1125,7 @@ emptyNodeAt name pos =
    in
   pure
     Node
-      { nodeTypeId = nodeTypeIdFor name
+      { nodeTypeId = nodeKindTypeId kind
       , nodeKind = kind
       , nodePos = pos
       , nodeChildren = []

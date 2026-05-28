@@ -33,17 +33,18 @@ initialState = PPState Map.empty []
 preprocess :: FilePath -> PPState -> IO (String, PPState)
 preprocess path state0 = do
   source <- readFile path
-  foldLines (takeDirectory path) (lines source) ("", state0)
+  (chunks, state1) <- foldLines (takeDirectory path) (lines source) ([], state0)
+  pure (concat (reverse chunks), state1)
 
-foldLines :: FilePath -> [String] -> (String, PPState) -> IO (String, PPState)
+foldLines :: FilePath -> [String] -> ([String], PPState) -> IO ([String], PPState)
 foldLines _ [] acc = pure acc
-foldLines dir (line : rest) (out, state0)
+foldLines dir (line : rest) (chunks, state0)
   | "#" `isPrefixTrimmed` line = do
       (included, state1) <- directive dir (trimStart (drop 1 (trimStart line))) state0
-      foldLines dir rest (out <> included, state1)
+      foldLines dir rest (included : chunks, state1)
   | isActive state0 =
-      foldLines dir rest (out <> expandMacros (macros state0) line <> "\n", state0)
-  | otherwise = foldLines dir rest (out, state0)
+      foldLines dir rest ((expandMacros (macros state0) line <> "\n") : chunks, state0)
+  | otherwise = foldLines dir rest (chunks, state0)
 
 directive :: FilePath -> String -> PPState -> IO (String, PPState)
 directive dir raw state0 =

@@ -7,6 +7,7 @@ module Tptcc.Ast
   , NodeKind (..)
   , nodeKindFor
   , nodeKindName
+  , nodeKindTypeId
   , nodeName
   , nodeIs
   , nodeTypeIdFor
@@ -16,6 +17,7 @@ module Tptcc.Ast
   ) where
 
 import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -23,7 +25,7 @@ import Tptcc.Token (SourcePos, Token (..), TokenValue (..))
 
 data Node = Node
   { nodeTypeId :: !Int
-  , nodeKind :: NodeKind
+  , nodeKind :: !NodeKind
   , nodePos :: SourcePos
   , nodeChildren :: [NodeChild]
   , nodeFields :: [NodeField]
@@ -136,7 +138,7 @@ data NodeValue
 
 nodeKindFor :: Text -> NodeKind
 nodeKindFor name =
-  case lookup name nodeKindsByName of
+  case Map.lookup name nodeKindsByName of
     Just kind -> kind
     Nothing -> error ("invalid node type: " ++ Text.unpack name)
 
@@ -148,18 +150,19 @@ nodeIs kind node = nodeKind node == kind
 
 nodeTypeIdFor :: Text -> Int
 nodeTypeIdFor name =
-  case lookup (nodeKindFor name) nodeTypes of
-    Just typeId -> typeId
-    Nothing -> error ("invalid node type: " ++ Text.unpack name)
+  nodeKindTypeId (nodeKindFor name)
+
+nodeKindTypeId :: NodeKind -> Int
+nodeKindTypeId kind = fromEnum kind + 1
 
 nodeTypes :: [(NodeKind, Int)]
-nodeTypes = zip allNodeKinds [1 ..]
+nodeTypes = [(kind, nodeKindTypeId kind) | kind <- allNodeKinds]
 
 allNodeKinds :: [NodeKind]
 allNodeKinds = [minBound .. maxBound]
 
-nodeKindsByName :: [(Text, NodeKind)]
-nodeKindsByName = [(nodeKindName kind, kind) | (kind, _) <- nodeTypes]
+nodeKindsByName :: Map.Map Text NodeKind
+nodeKindsByName = Map.fromList [(nodeKindName kind, kind) | kind <- allNodeKinds]
 
 nodeKindName :: NodeKind -> Text
 nodeKindName kind =
