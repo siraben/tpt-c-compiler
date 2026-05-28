@@ -4,7 +4,9 @@ module Tptcc.Preprocessor
 
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isSpace)
 import qualified Data.Map.Strict as Map
+import Data.Void (Void)
 import System.FilePath ((</>), takeDirectory)
+import qualified Text.Megaparsec as MP
 
 data Macro
   = ObjectMacro String
@@ -95,8 +97,9 @@ expandMacros table = go
                 Just (FunctionMacro params body) ->
                   case trimStart suffix of
                     '(' : callRest ->
-                      let (args, afterCall) = parseMacroArguments callRest
-                       in expandMacros table (substitute params args body) <> go afterCall
+                      case parseMacroArguments callRest of
+                        Just (args, afterCall) -> expandMacros table (substitute params args body) <> go afterCall
+                        Nothing -> name <> go suffix
                     _ -> name <> go suffix
                 Nothing -> name <> go suffix
       | c == '"' =
@@ -107,17 +110,73 @@ expandMacros table = go
            in c : literal <> go suffix
       | otherwise = c : go rest
 
-parseMacroArguments :: String -> ([String], String)
-parseMacroArguments = go 0 "" []
+type MacroParser = MP.Parsec Void String
+
+parseMacroArguments :: String -> Maybe ([String], String)
+parseMacroArguments input =
+  case MP.runParser macroArgumentsParser "<macro-arguments>" input of
+    Right result -> Just result
+    Left _ -> Nothing
+
+macroArgumentsParser :: MacroParser ([String], String)
+macroArgumentsParser = do
+  args <-
+    ([] <$ MP.single ')')
+      MP.<|> do
+        first <- macroArgument
+        rest <- MP.many (MP.single ',' *> macroArgument)
+        _ <- MP.single ')'
+        pure (map trim (first : rest))
+  remaining <- MP.getInput
+  pure (args, remaining)
+
+macroArgument :: MacroParser String
+macroArgument =
+  concat <$> MP.many macroArgumentPiece
+
+macroArgumentPiece :: MacroParser String
+macroArgumentPiece =
+  quoted '"'
+    MP.<|> quoted '\''
+    MP.<|> parenthesized
+    MP.<|> normalArgumentChar
+
+parenthesized :: MacroParser String
+parenthesized = do
+  _ <- MP.single '('
+  body <- concat <$> MP.many parenthesizedPiece
+  _ <- MP.single ')'
+  pure ("(" <> body <> ")")
+
+parenthesizedPiece :: MacroParser String
+parenthesizedPiece =
+  quoted '"'
+    MP.<|> quoted '\''
+    MP.<|> parenthesized
+    MP.<|> normalParenthesizedChar
+
+quoted :: Char -> MacroParser String
+quoted quote = do
+  _ <- MP.single quote
+  body <- concat <$> MP.manyTill quotedPiece (MP.single quote)
+  pure (quote : body <> [quote])
   where
-    go :: Integer -> String -> [String] -> String -> ([String], String)
-    go _ current args [] = (reverse (trim current : args), [])
-    go depth current args (')' : rest)
-      | depth == 0 = (reverse (trim current : args), rest)
-      | otherwise = go (depth - 1) (current <> ")") args rest
-    go depth current args ('(' : rest) = go (depth + 1) (current <> "(") args rest
-    go 0 current args (',' : rest) = go 0 "" (trim current : args) rest
-    go depth current args (c : rest) = go depth (current <> [c]) args rest
+    quotedPiece =
+      escapedChar MP.<|> ((: []) <$> MP.satisfy (/= quote))
+
+escapedChar :: MacroParser String
+escapedChar = do
+  _ <- MP.single '\\'
+  escaped <- MP.anySingle
+  pure ['\\', escaped]
+
+normalArgumentChar :: MacroParser String
+normalArgumentChar =
+  (: []) <$> MP.satisfy (`notElem` [',', ')', '('])
+
+normalParenthesizedChar :: MacroParser String
+normalParenthesizedChar =
+  (: []) <$> MP.satisfy (`notElem` [')', '('])
 
 substitute :: [String] -> [String] -> String -> String
 substitute params args =

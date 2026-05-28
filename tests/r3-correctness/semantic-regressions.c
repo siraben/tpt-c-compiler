@@ -1,3 +1,7 @@
+#define FIRST_ARG(a, b) a
+#define SECOND_ARG(a, b) b
+#define ID_ARG(x) x
+
 int pick_first(int value, ...) {
     return value;
 }
@@ -29,6 +33,10 @@ label:
         putchar(high <= low ? 'c' : 'C');
         putchar(low >= high ? 'd' : 'D');
     }
+
+    __print_char_array(FIRST_ARG("Y,Z", "bad"));
+    putchar(SECOND_ARG('x', ','));
+    __print_unsigned_int(ID_ARG((2 + (3))));
 
     return 0;
 }

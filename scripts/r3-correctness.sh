@@ -122,6 +122,6 @@ run_case union-members "6" "" "optimized unoptimized"
 run_case enum-switch "36" "" "optimized unoptimized"
 run_case feature-torture "7181"
 run_case c89-parity "22"
-run_case semantic-regressions "x21745ABCD" "" "optimized unoptimized"
+run_case semantic-regressions "x21745ABCDY,Z,5" "" "optimized unoptimized"
 
 echo "R3 C correctness suite passed"
