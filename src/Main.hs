@@ -1,11 +1,13 @@
 module Main (main) where
 
 import Data.List (intercalate, sort, sortOn)
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as Text
 import Numeric (showHex)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure), exitWith)
 import System.FilePath (replaceExtension)
+import qualified Options.Applicative as OA
 
 import Tptcc.Ast (renderAst)
 import Tptcc.CodeGen (CodeGenOptions (..), defaultCodeGenOptions, dumpNativeAsmOptimized, dumpNativeAsmOptimizedWithOptions, dumpNativeAsmUnoptimized)
@@ -21,27 +23,24 @@ import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Token (SourcePos (..), Token (..), TokenValue (..))
 import qualified Tptcc.TypeChecker as TypeChecker
 
-usage :: String
-usage =
-  "Usage: tptcc-hs input.c [--output output.asm] [--size total-memory-size] "
-    <> "[--term-width width] [--term-height height] [--offset offset] "
-    <> "[--symbols symbols.json] [--breakpoints \"[5, 8, 13]\"] "
-    <> "[--dump-ssa input.c]"
-
 main :: IO ()
 main = do
   args <- getArgs
-  case args of
-    ["--dump-tokens", input] -> dumpTokens input
-    ["--dump-ast", input] -> dumpAst input
-    ["--dump-type-events", input] -> dumpTypeEvents input
-    ["--dump-ir-globals", input] -> dumpIRGlobalEvents input
-    ["--dump-simple-tac", input] -> dumpSimpleTacEvents input
-    ["--dump-ssa", input] -> dumpSSAEvents input
-    ["--dump-native-asm-unoptimized", input] -> dumpNativeAsmUnoptimizedEvents input
-    ["--dump-native-asm-optimized", input] -> dumpNativeAsmOptimizedEvents input
-    ["--dump-default-symbols"] -> dumpDefaultSymbols
-    _ -> runCompiler args
+  command <- OA.handleParseResult (OA.execParserPure OA.defaultPrefs cliInfo (normalizeArgs args))
+  runCommand command
+
+data Command
+  = RunNative CompileConfig
+  | DumpTokens FilePath
+  | DumpAst FilePath
+  | DumpTypeEvents FilePath
+  | DumpIRGlobals FilePath
+  | DumpSimpleTac FilePath
+  | DumpSSA FilePath
+  | DumpNativeAsmUnoptimized FilePath
+  | DumpNativeAsmOptimized FilePath
+  | DumpDefaultSymbols
+  deriving (Eq, Show)
 
 data CompileConfig = CompileConfig
   { compileInput :: FilePath
@@ -51,19 +50,101 @@ data CompileConfig = CompileConfig
   }
   deriving (Eq, Show)
 
-data CompileParseResult
-  = NativeConfig CompileConfig
-  | ParseError String
-  deriving (Eq, Show)
+cliInfo :: OA.ParserInfo Command
+cliInfo =
+  OA.info
+    (commandParser OA.<**> OA.helper)
+    ( OA.fullDesc
+        <> OA.forwardOptions
+        <> OA.progDesc "Compile C programs for the R3 target"
+        <> OA.header "tptcc-hs"
+    )
 
-runCompiler :: [String] -> IO ()
-runCompiler args =
-  case parseCompileArgs args of
-    NativeConfig config -> runNativeCompiler config
-    ParseError err -> do
-      putStrLn err
-      putStrLn usage
-      exitWith (ExitFailure 1)
+commandParser :: OA.Parser Command
+commandParser =
+  OA.asum
+    [ dumpFlag DumpTokens "dump-tokens" "Print lexer tokens"
+    , dumpFlag DumpAst "dump-ast" "Print parsed AST"
+    , dumpFlag DumpTypeEvents "dump-type-events" "Print type checker events"
+    , dumpFlag DumpIRGlobals "dump-ir-globals" "Print global IR events"
+    , dumpFlag DumpSimpleTac "dump-simple-tac" "Print simple TAC"
+    , dumpFlag DumpSSA "dump-ssa" "Print SSA"
+    , dumpFlag DumpNativeAsmUnoptimized "dump-native-asm-unoptimized" "Print unoptimized native assembly"
+    , dumpFlag DumpNativeAsmOptimized "dump-native-asm-optimized" "Print optimized native assembly"
+    , DumpDefaultSymbols <$ OA.flag' () (OA.long "dump-default-symbols" <> OA.help "Print built-in symbols")
+    , RunNative <$> compileConfigParser
+    ]
+
+normalizeArgs :: [String] -> [String]
+normalizeArgs args@(first : rest)
+  | not (isOption first) = rest <> [first]
+  | otherwise = args
+normalizeArgs [] = []
+
+isOption :: String -> Bool
+isOption ('-' : _) = True
+isOption _ = False
+
+dumpFlag :: (FilePath -> Command) -> String -> String -> OA.Parser Command
+dumpFlag command name description =
+  command
+    <$ OA.flag' () (OA.long name <> OA.help description)
+    <*> OA.argument OA.str (OA.metavar "INPUT")
+
+compileConfigParser :: OA.Parser CompileConfig
+compileConfigParser =
+  mkConfig
+    <$> OA.optional (OA.strOption (OA.long "output" <> OA.metavar "OUTPUT" <> OA.help "Write assembly to OUTPUT"))
+    <*> OA.optional (OA.strOption (OA.long "symbols" <> OA.metavar "SYMBOLS_JSON" <> OA.help "Write symbols JSON"))
+    <*> OA.many codeGenOptionParser
+    <*> OA.argument OA.str (OA.metavar "INPUT")
+  where
+    mkConfig output symbols optionUpdates input =
+      CompileConfig
+        { compileInput = input
+        , compileOutput = fromMaybe (replaceExtension input "asm") output
+        , compileOptions = foldl (flip ($)) defaultCodeGenOptions optionUpdates
+        , compileSymbolsOutput = symbols
+        }
+
+codeGenOptionParser :: OA.Parser (CodeGenOptions -> CodeGenOptions)
+codeGenOptionParser =
+  OA.asum
+    [ (\n opts -> opts {codeGenMemorySize = n - 1}) <$> integerOption "size" "TOTAL_MEMORY_SIZE" "Set total memory size"
+    , (\n opts -> opts {codeGenTermWidth = n}) <$> integerOption "term-width" "WIDTH" "Set terminal width"
+    , (\n opts -> opts {codeGenTermHeight = n}) <$> integerOption "term-height" "HEIGHT" "Set terminal height"
+    , (\n opts -> opts {codeGenGlobalAddr = codeGenGlobalAddr opts + n}) <$> integerOption "offset" "OFFSET" "Offset global address"
+    , (\values opts -> opts {codeGenBreakpoints = sort values}) <$> breakpointOption
+    ]
+
+integerOption :: String -> String -> String -> OA.Parser Integer
+integerOption name metavar description =
+  OA.option OA.auto (OA.long name <> OA.metavar metavar <> OA.help description)
+
+breakpointOption :: OA.Parser [Integer]
+breakpointOption =
+  OA.option
+    (OA.eitherReader parseBreakpoints)
+    (OA.long "breakpoints" <> OA.metavar "[ADDR,...]" <> OA.help "Enable debug breakpoints")
+
+parseBreakpoints :: String -> Either String [Integer]
+parseBreakpoints raw =
+  case reads raw of
+    [(values, "")] -> Right values
+    _ -> Left ("invalid breakpoint list: " <> raw)
+
+runCommand :: Command -> IO ()
+runCommand = \case
+  RunNative config -> runNativeCompiler config
+  DumpTokens input -> dumpTokens input
+  DumpAst input -> dumpAst input
+  DumpTypeEvents input -> dumpTypeEvents input
+  DumpIRGlobals input -> dumpIRGlobalEvents input
+  DumpSimpleTac input -> dumpSimpleTacEvents input
+  DumpSSA input -> dumpSSAEvents input
+  DumpNativeAsmUnoptimized input -> dumpNativeAsmUnoptimizedEvents input
+  DumpNativeAsmOptimized input -> dumpNativeAsmOptimizedEvents input
+  DumpDefaultSymbols -> dumpDefaultSymbols
 
 runNativeCompiler :: CompileConfig -> IO ()
 runNativeCompiler config = do
@@ -75,69 +156,6 @@ runNativeCompiler config = do
     Right asm -> do
       writeFile (compileOutput config) asm
       maybe (pure ()) (const (putStrLn "[ERROR] dkjson not found, symbols cannot be exported to json")) (compileSymbolsOutput config)
-
-parseCompileArgs :: [String] -> CompileParseResult
-parseCompileArgs [] = ParseError "missing input file"
-parseCompileArgs (input : rest) =
-  parseOptions
-    rest
-    CompileConfig
-      { compileInput = input
-      , compileOutput = replaceExtension input "asm"
-      , compileOptions = defaultCodeGenOptions
-      , compileSymbolsOutput = Nothing
-      }
-
-parseOptions :: [String] -> CompileConfig -> CompileParseResult
-parseOptions [] config = NativeConfig config
-parseOptions (flag : value : rest) config =
-  case flag of
-    "--output" -> parseOptions rest config {compileOutput = value}
-    "--symbols" -> parseOptions rest config {compileSymbolsOutput = Just value}
-    "--breakpoints" -> updateBreakpoints value
-    "--size" -> updateInteger value (\n opts -> opts {codeGenMemorySize = n - 1})
-    "--term-width" -> updateInteger value (\n opts -> opts {codeGenTermWidth = n})
-    "--term-height" -> updateInteger value (\n opts -> opts {codeGenTermHeight = n})
-    "--offset" -> updateInteger value (\n opts -> opts {codeGenGlobalAddr = codeGenGlobalAddr opts + n})
-    _ -> ParseError ("unknown option: " <> flag)
-  where
-    updateInteger raw update =
-      case reads raw of
-        [(n, "")] -> parseOptions rest config {compileOptions = update n (compileOptions config)}
-        _ -> ParseError ("invalid integer for " <> flag <> ": " <> raw)
-    updateBreakpoints raw =
-      case parseBreakpointList raw of
-        Just values -> parseOptions rest config {compileOptions = (compileOptions config) {codeGenBreakpoints = sort values}}
-        Nothing -> ParseError ("invalid breakpoint list: " <> raw)
-parseOptions [flag] _ = ParseError ("missing value for " <> flag)
-
-parseBreakpointList :: String -> Maybe [Integer]
-parseBreakpointList raw =
-  case raw of
-    '[' : rest ->
-      case reverse rest of
-        ']' : insideReversed -> parseBreakpointValues (reverse insideReversed)
-        _ -> Nothing
-    _ -> Nothing
-
-parseBreakpointValues :: String -> Maybe [Integer]
-parseBreakpointValues "" = Just []
-parseBreakpointValues value =
-  traverse parseInteger (splitCommas value)
-
-parseInteger :: String -> Maybe Integer
-parseInteger raw =
-  case reads raw of
-    [(value, "")] -> Just value
-    _ -> Nothing
-
-splitCommas :: String -> [String]
-splitCommas "" = []
-splitCommas value =
-  let (prefix, suffix) = break (== ',') value
-   in case suffix of
-        [] -> [prefix]
-        _ : rest -> prefix : splitCommas rest
 
 dumpNativeAsmOptimizedEvents :: FilePath -> IO ()
 dumpNativeAsmOptimizedEvents input = do

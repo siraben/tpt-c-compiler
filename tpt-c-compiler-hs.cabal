@@ -37,6 +37,7 @@ executable tptcc-hs
     effectful,
     filepath,
     megaparsec,
+    optparse-applicative,
     prettyprinter,
     text,
     transformers
