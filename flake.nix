@@ -34,7 +34,8 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.cabal-install
-              pkgs.ghc
+              (pkgs.ghc.withPackages (ps: [ ps.effectful ]))
+              pkgs.haskellPackages.hlint
               pkgs.lua5_4
             ];
           };

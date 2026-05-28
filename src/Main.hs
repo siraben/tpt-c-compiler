@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Data.List (intercalate, sort, sortOn)
+import qualified Data.Text as Text
 import Numeric (showHex)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure), exitWith)
@@ -205,14 +206,14 @@ dumpDefaultSymbols :: IO ()
 dumpDefaultSymbols =
   mapM_ (putStrLn . renderDefaultSymbol) (sortOn fst defaultSymbols)
 
-renderDefaultSymbol :: (String, Symbol) -> String
+renderDefaultSymbol :: (Text.Text, Symbol) -> String
 renderDefaultSymbol (name, symbol) =
   intercalate
     "\t"
-    [ name
-    , renderTypePretty (symbolType symbol)
-    , maybe "" operandType (symbolPlace symbol)
-    , maybe "" (renderOperandValue . operandValue) (symbolPlace symbol)
+    [ Text.unpack name
+    , Text.unpack (renderTypePretty (symbolType symbol))
+    , maybe "" (Text.unpack . operandType) (symbolPlace symbol)
+    , maybe "" (Text.unpack . renderOperandValue . operandValue) (symbolPlace symbol)
     , maybe "false" (renderBool . operandIsStandardFunction) (symbolPlace symbol)
     , maybe "" (maybe "" renderBool . operandIsVariadic) (symbolPlace symbol)
     ]
@@ -231,7 +232,7 @@ renderToken token =
   intercalate
     "\t"
     [ show (tokenTypeId token)
-    , tokenName token
+    , Text.unpack (tokenName token)
     , renderValue (tokenValue token)
     , show (row (tokenPos token))
     , show (col (tokenPos token))
@@ -239,7 +240,7 @@ renderToken token =
 
 renderValue :: TokenValue -> String
 renderValue (ValueInt value) = "N:" <> show value
-renderValue (ValueString value) = "S:" <> concatMap renderHexByte value
+renderValue (ValueString value) = "S:" <> concatMap renderHexByte (Text.unpack value)
 
 renderHexByte :: Char -> String
 renderHexByte c =

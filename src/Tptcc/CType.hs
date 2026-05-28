@@ -5,9 +5,15 @@ module Tptcc.CType
   , base
   , baseWithSigned
   , baseFromSpecifiers
+  , isBaseSpecifiers
+  , isIntegerType
+  , integerPromotion
+  , usualArithmeticConversion
+  , defaultArgumentPromotion
   , pointer
   , array
   , function
+  , variadicFunction
   , struct
   , union
   , enum
@@ -19,7 +25,9 @@ module Tptcc.CType
   , renderTypePretty
   ) where
 
-import Data.Char (isAsciiLower)
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 data TypeKind
   = Void
@@ -39,30 +47,30 @@ data CType
   = BaseType {typeKind :: TypeKind, typeSigned :: Bool}
   | PointerType {pointsTo :: CType}
   | ArrayType {arrayLength :: Integer, pointsTo :: CType}
-  | FunctionType {returnType :: CType, parameterTypes :: [CType]}
-  | StructType {typeId :: String, members :: [Member]}
-  | UnionType {typeId :: String, members :: [Member]}
-  | EnumType {typeId :: String, enumMembers :: [String]}
+  | FunctionType {returnType :: CType, parameterTypes :: [CType], functionIsVariadic :: Bool}
+  | StructType {typeId :: Text, members :: [Member]}
+  | UnionType {typeId :: Text, members :: [Member]}
+  | EnumType {typeId :: Text, enumMembers :: [Text]}
   deriving (Eq, Show)
 
 data Member = Member
-  { memberName :: String
+  { memberName :: Text
   , memberType :: CType
   , memberOffset :: Maybe Integer
   }
   deriving (Eq, Show)
 
-base :: String -> CType
+base :: Text -> CType
 base kind = baseWithSigned kind True
 
-baseWithSigned :: String -> Bool -> CType
+baseWithSigned :: Text -> Bool -> CType
 baseWithSigned kind signed = BaseType {typeKind = baseKind kind, typeSigned = signed}
 
-baseFromSpecifiers :: [String] -> CType
+baseFromSpecifiers :: [Text] -> CType
 baseFromSpecifiers specifiers =
   baseWithSigned kind signed
   where
-    normalized = map (map toUpperAscii) specifiers
+    normalized = map Text.toUpper specifiers
     signed = "UNSIGNED" `notElem` normalized
     kind
       | "VOID" `elem` normalized = "VOID"
@@ -71,6 +79,97 @@ baseFromSpecifiers specifiers =
       | "LONG" `elem` normalized = "LONG"
       | otherwise = "INT"
 
+isBaseSpecifiers :: [Text] -> Bool
+isBaseSpecifiers specifiers =
+  not (null normalized)
+    && all (`elem` baseSpecifierWords) normalized
+    && length signSpecifiers <= 1
+    && not (baseSpecifiers == ["VOID"] && not (null signSpecifiers))
+    && validBaseWords baseSpecifiers
+  where
+    normalized = map Text.toUpper specifiers
+    signSpecifiers = filter (`elem` ["SIGNED", "UNSIGNED"]) normalized
+    baseSpecifiers = filter (`notElem` ["SIGNED", "UNSIGNED"]) normalized
+
+baseSpecifierWords :: [Text]
+baseSpecifierWords = ["VOID", "CHAR", "SHORT", "INT", "LONG", "SIGNED", "UNSIGNED"]
+
+validBaseWords :: [Text] -> Bool
+validBaseWords words' =
+  case words' of
+    [] -> True
+    ["VOID"] -> True
+    ["CHAR"] -> True
+    ["INT"] -> True
+    ["SHORT"] -> True
+    ["SHORT", "INT"] -> True
+    ["INT", "SHORT"] -> True
+    ["LONG"] -> True
+    ["LONG", "INT"] -> True
+    ["INT", "LONG"] -> True
+    _ -> False
+
+isIntegerType :: CType -> Bool
+isIntegerType ty =
+  case ty of
+    BaseType Void _ -> False
+    BaseType {} -> True
+    EnumType {} -> True
+    _ -> False
+
+integerPromotion :: CType -> Maybe CType
+integerPromotion ty =
+  case ty of
+    BaseType Char _ -> Just (base "INT")
+    BaseType Short _ -> Just (base "INT")
+    BaseType Int signed -> Just (BaseType Int signed)
+    BaseType Long signed -> Just (BaseType Long signed)
+    EnumType {} -> Just (base "INT")
+    _ -> Nothing
+
+usualArithmeticConversion :: CType -> CType -> Maybe CType
+usualArithmeticConversion lhs rhs = do
+  lhs' <- integerPromotion lhs
+  rhs' <- integerPromotion rhs
+  combinePromotedIntegers lhs' rhs'
+
+defaultArgumentPromotion :: CType -> CType
+defaultArgumentPromotion ty = fromMaybe ty (integerPromotion ty)
+
+combinePromotedIntegers :: CType -> CType -> Maybe CType
+combinePromotedIntegers lhs rhs =
+  case (lhs, rhs) of
+    (BaseType lhsKind lhsSigned, BaseType rhsKind rhsSigned)
+      | lhsKind == rhsKind && lhsSigned == rhsSigned -> Just lhs
+      | lhsSigned == rhsSigned -> Just (higherRankInteger lhs rhs)
+      | not lhsSigned && integerRank lhsKind >= integerRank rhsKind -> Just lhs
+      | not rhsSigned && integerRank rhsKind >= integerRank lhsKind -> Just rhs
+      | lhsSigned && signedCanRepresentUnsigned lhsKind rhsKind -> Just lhs
+      | rhsSigned && signedCanRepresentUnsigned rhsKind lhsKind -> Just rhs
+      | lhsSigned -> Just (BaseType lhsKind False)
+      | otherwise -> Just (BaseType rhsKind False)
+    _ -> Nothing
+
+higherRankInteger :: CType -> CType -> CType
+higherRankInteger lhs@(BaseType lhsKind _) rhs@(BaseType rhsKind _)
+  | integerRank lhsKind >= integerRank rhsKind = lhs
+  | otherwise = rhs
+higherRankInteger lhs _ = lhs
+
+integerRank :: TypeKind -> Int
+integerRank kind =
+  case kind of
+    Char -> 1
+    Short -> 2
+    Int -> 3
+    Enum -> 3
+    Long -> 4
+    _ -> 0
+
+signedCanRepresentUnsigned :: TypeKind -> TypeKind -> Bool
+signedCanRepresentUnsigned signedKind unsignedKind =
+  integerRank signedKind > integerRank unsignedKind
+
 pointer :: CType -> CType
 pointer = PointerType
 
@@ -78,15 +177,18 @@ array :: Integer -> CType -> CType
 array = ArrayType
 
 function :: CType -> [CType] -> CType
-function = FunctionType
+function ret params = FunctionType ret params False
 
-struct :: String -> [Member] -> CType
+variadicFunction :: CType -> [CType] -> CType
+variadicFunction ret params = FunctionType ret params True
+
+struct :: Text -> [Member] -> CType
 struct = StructType
 
-union :: String -> [Member] -> CType
+union :: Text -> [Member] -> CType
 union = UnionType
 
-enum :: String -> [String] -> CType
+enum :: Text -> [Text] -> CType
 enum = EnumType
 
 sizeof :: CType -> Integer
@@ -105,7 +207,7 @@ withMemberOffsets isStruct members'
     addStructMember (offset, acc) member =
       (offset + sizeof (memberType member), member {memberOffset = Just offset} : acc)
 
-memberByName :: String -> [Member] -> Maybe Member
+memberByName :: Text -> [Member] -> Maybe Member
 memberByName wanted =
   go
   where
@@ -121,20 +223,20 @@ sameTypeChain lhs rhs allowLengthMismatch =
     (ArrayType la a, ArrayType lb b) ->
       (allowLengthMismatch || la == lb) && sameTypeChain a b allowLengthMismatch
     (BaseType ka sa, BaseType kb sb) -> ka == kb && sa == sb
-    (FunctionType ra pa, FunctionType rb pb) -> ra == rb && pa == pb
+    (FunctionType ra pa va, FunctionType rb pb vb) -> ra == rb && pa == pb && va == vb
     (StructType ida _, StructType idb _) -> ida == idb
     (UnionType ida _, UnionType idb _) -> ida == idb
     (EnumType ida _, EnumType idb _) -> ida == idb
     _ -> False
 
-renderType :: CType -> String
+renderType :: CType -> Text
 renderType ty =
   case ty of
     PointerType target -> renderType target <> "*"
     ArrayType len target -> renderType target <> "[" <> renderLength len <> "]"
     _ -> renderKind (typeKindOf ty)
 
-renderTypePretty :: CType -> String
+renderTypePretty :: CType -> Text
 renderTypePretty = renderPrettyChain . reverse . typeChain
 
 typeChain :: CType -> [CType]
@@ -144,37 +246,38 @@ typeChain ty =
     ArrayType _ target -> ty : typeChain target
     _ -> [ty]
 
-renderPrettyChain :: [CType] -> String
+renderPrettyChain :: [CType] -> Text
 renderPrettyChain [] = "?"
 renderPrettyChain (ty : modifiers) = renderPrettyModifiers (renderPrettyAtom ty) modifiers
 
-renderPrettyModifiers :: String -> [CType] -> String
+renderPrettyModifiers :: Text -> [CType] -> Text
 renderPrettyModifiers rendered [] = rendered
 renderPrettyModifiers rendered modifiers@(ArrayType {} : _) =
   let (arrays, rest) = span isArrayType modifiers
-      renderedArrays = concatMap renderArrayModifier (reverse arrays)
+      renderedArrays = foldMap renderArrayModifier (reverse arrays)
    in renderPrettyModifiers (rendered <> renderedArrays) rest
 renderPrettyModifiers rendered (PointerType {} : rest) = renderPrettyModifiers (rendered <> "*") rest
 renderPrettyModifiers rendered (ty : rest) = renderPrettyModifiers (rendered <> renderPrettyAtom ty) rest
 
-renderPrettyAtom :: CType -> String
+renderPrettyAtom :: CType -> Text
 renderPrettyAtom ty =
   case ty of
-    FunctionType ret params ->
-      "FUNCTION((" <> concatMap ((<> ", ") . renderTypePretty) params <> ") -> " <> renderTypePretty ret <> ")"
+    FunctionType ret params isVariadic ->
+      let renderedParams = map renderTypePretty params <> ["..." | isVariadic]
+       in "FUNCTION((" <> Text.intercalate ", " renderedParams <> ") -> " <> renderTypePretty ret <> ")"
     _ -> renderKind (typeKindOf ty)
 
 isArrayType :: CType -> Bool
 isArrayType ArrayType {} = True
 isArrayType _ = False
 
-renderArrayModifier :: CType -> String
+renderArrayModifier :: CType -> Text
 renderArrayModifier (ArrayType len _) = "[" <> renderLength len <> "]"
 renderArrayModifier _ = ""
 
-renderLength :: Integer -> String
+renderLength :: Integer -> Text
 renderLength len
-  | len >= 0 = show len
+  | len >= 0 = Text.pack (show len)
   | otherwise = "?"
 
 typeKindOf :: CType -> TypeKind
@@ -186,9 +289,9 @@ typeKindOf StructType {} = Struct
 typeKindOf UnionType {} = Union
 typeKindOf EnumType {} = Enum
 
-baseKind :: String -> TypeKind
+baseKind :: Text -> TypeKind
 baseKind kind =
-  case map toUpperAscii kind of
+  case Text.toUpper kind of
     "VOID" -> Void
     "CHAR" -> Char
     "SHORT" -> Short
@@ -197,9 +300,9 @@ baseKind kind =
     "STRUCT" -> Struct
     "UNION" -> Union
     "ENUM" -> Enum
-    other -> error ("invalid base type kind: " <> other)
+    other -> error ("invalid base type kind: " <> Text.unpack other)
 
-renderKind :: TypeKind -> String
+renderKind :: TypeKind -> Text
 renderKind kind =
   case kind of
     Void -> "VOID"
@@ -213,8 +316,3 @@ renderKind kind =
     Array -> "ARRAY"
     Function -> "FUNCTION"
     Enum -> "ENUM"
-
-toUpperAscii :: Char -> Char
-toUpperAscii c
-  | isAsciiLower c = toEnum (fromEnum c - 32)
-  | otherwise = c

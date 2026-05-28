@@ -8,17 +8,21 @@ module Tptcc.IRSimpleTac
   , TacProgram (..)
   ) where
 
-import Control.Monad (forM, forM_, unless, void, when)
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
+import Control.Monad (foldM, forM, forM_, unless, void, when)
 import Data.Foldable (for_, toList)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq, (><), (|>))
 import qualified Data.Sequence as Seq
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Effectful
+import qualified Effectful.Error.Static as Error
+import Effectful.State.Static.Local (State)
+import qualified Effectful.State.Static.Local as State
 
 import Tptcc.Ast
-import Tptcc.CType (CType (..), Member (..), TypeKind (..), array, base, baseFromSpecifiers, enum, function, memberByName, pointer, sizeof, struct, union, withMemberOffsets)
+import Tptcc.CType (CType (..), Member (..), TypeKind (..), array, base, baseFromSpecifiers, baseWithSigned, enum, function, integerPromotion, isBaseSpecifiers, memberByName, pointer, sizeof, struct, union, usualArithmeticConversion, variadicFunction, withMemberOffsets)
 import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
@@ -48,6 +52,16 @@ data CaseContext = CaseContext
   }
   deriving (Eq, Show)
 
+data FunctionContext = FunctionContext
+  { contextMethodName :: Text
+  , contextLocalOffset :: Integer
+  , contextLocals :: Map.Map Text LocalInfo
+  , contextInstructions :: Seq Instr
+  , contextLoopLabels :: [(Place, Place)]
+  , contextCaseLabels :: [CaseContext]
+  }
+  deriving (Eq, Show)
+
 data TacState = TacState
   { localOffset :: Integer
   , globalOffset :: Integer
@@ -55,13 +69,13 @@ data TacState = TacState
   , labelCounter :: Integer
   , loopLabels :: [(Place, Place)]
   , caseLabels :: [CaseContext]
-  , currentMethodName :: String
-  , functionPlaces :: Map.Map String Place
-  , functionReturns :: Map.Map String Bool
-  , enumConstants :: Map.Map String Place
-  , typeTags :: Map.Map String CType
-  , globals :: Map.Map String LocalInfo
-  , locals :: Map.Map String LocalInfo
+  , currentMethodName :: Text
+  , functionPlaces :: Map.Map Text Place
+  , functionReturns :: Map.Map Text Bool
+  , enumConstants :: Map.Map Text Place
+  , typeTags :: Map.Map Text CType
+  , globals :: Map.Map Text LocalInfo
+  , locals :: Map.Map Text LocalInfo
   , instructions :: Seq Instr
   , methods :: [MethodOutput]
   , breakpoints :: [Integer]
@@ -69,7 +83,9 @@ data TacState = TacState
   }
   deriving (Eq, Show)
 
-type TacM = StateT TacState (Either String)
+type TacM = Eff TacEffects
+
+type TacEffects = '[State TacState, Error.Error String]
 
 dumpSimpleTac :: Node -> Either String [String]
 dumpSimpleTac ast = do
@@ -81,13 +97,17 @@ generateSimpleTac = generateSimpleTacWithBreakpoints []
 
 generateSimpleTacWithBreakpoints :: [Integer] -> Node -> Either String TacProgram
 generateSimpleTacWithBreakpoints requestedBreakpoints ast = do
-  (_, st) <- runStateT (emitProgram ast) (initialState requestedBreakpoints)
+  (_, st) <- runTac requestedBreakpoints (emitProgram ast)
   pure
     TacProgram
       { tacProgramMethods = reverse (methods st)
       , tacProgramGlobalSize = globalOffset st
       , tacProgramGlobalInstructions = toList (instructions st)
       }
+
+runTac :: [Integer] -> TacM a -> Either String (a, TacState)
+runTac requestedBreakpoints action =
+  runPureEff (Error.runErrorNoCallStack (State.runState (initialState requestedBreakpoints) action))
 
 initialState :: [Integer] -> TacState
 initialState requestedBreakpoints =
@@ -117,7 +137,7 @@ emitProgram program = do
       functionEntries = [(declaratorName declarator, declaration, declarator) | declaration <- declarations, hasNodeField "block" declaration, Just declarator <- [fieldNodeMaybe "declarator" declaration]]
       userFunctionPlaces = Map.fromList [(name, Place "i" ("__tptcc_fn_" <> name)) | (name, _, _) <- functionEntries]
       userFunctionReturns = Map.fromList [("__tptcc_fn_" <> name, functionDeclarationReturnsValue declaration) | (name, declaration, _) <- functionEntries]
-  modify' (\st -> st {functionPlaces = Map.union userFunctionPlaces (functionPlaces st), functionReturns = Map.union userFunctionReturns (functionReturns st)})
+  State.modify (\st -> st {functionPlaces = Map.union userFunctionPlaces (functionPlaces st), functionReturns = Map.union userFunctionReturns (functionReturns st)})
   mapM_ collectEnumConstants declarations
   mapM_ emitTopLevelDeclaration declarations
 
@@ -151,7 +171,7 @@ emitGlobalDeclaration declaration = do
                 nextGlobalSize 1
               else nextGlobalSize size
           let info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
-          modify' (\st -> st {globals = Map.insert name info (globals st)})
+          State.modify (\st -> st {globals = Map.insert name info (globals st)})
           unless (pointerLevel > 0 && initializerContainsDirectString initializer) $
             allocateNestedInitializerStrings pointerLevel dimensions initializer
           maybe (pure ()) (simulateGlobalInitializer place) initializer
@@ -162,7 +182,7 @@ collectEnumConstants declaration =
     Just enumDeclaration ->
       forM_ (enumMemberValues (childNodes enumDeclaration)) $ \(member, value) -> do
         memberId <- fieldNode "id" member
-        modify' (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (show value)) (enumConstants st)})
+        State.modify (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (Text.pack (show value))) (enumConstants st)})
     Nothing -> pure ()
 
 enumSpecifierFromDeclaration :: Node -> Maybe Node
@@ -171,51 +191,78 @@ enumSpecifierFromDeclaration declaration = do
   typeSpecifier <- fieldNodeMaybe "type_specifier" specifier
   case lookupField "kind" typeSpecifier of
     Just (NodeRef enumSpecifier)
-      | nodeName enumSpecifier == "ENUM_SPECIFIER" -> Just enumSpecifier
+      | nodeIs NodeEnumSpecifier enumSpecifier -> Just enumSpecifier
     _ -> Nothing
 
-emitFunction :: (String, Node, Node) -> TacM ()
+emitFunction :: (Text, Node, Node) -> TacM ()
 emitFunction (name, declaration, declarator) = do
-  previousMethod <- currentMethodName <$> get
-  previousLocals <- locals <$> get
-  previousLocalOffset <- localOffset <$> get
-  previousInstructions <- instructions <$> get
   block <- fieldNode "block" declaration
   params <- parameterPlaces declarator
-  modify'
-    ( \st ->
-        st
-          { currentMethodName = name
-          , localOffset = 0
-          , locals = Map.fromList params
-          , instructions = Seq.empty
-          , loopLabels = []
-          , caseLabels = []
-          }
-    )
+  previous <- captureFunctionContext
+  enterFunctionContext name params
   emitBlock block
-  st <- get
-  let output =
-        MethodOutput
-          { methodOutputName = name
-          , methodOutputInstructions = toList (instructions st)
-          , methodOutputLocalSize = localOffset st
-          }
-  modify'
-    ( \s ->
-        s
-          { methods = output : methods s
-          , currentMethodName = previousMethod
-          , locals = previousLocals
-          , localOffset = previousLocalOffset
-          , instructions = previousInstructions
-          , loopLabels = []
-          , caseLabels = []
-          }
-    )
+  output <- currentMethodOutput name
+  restoreFunctionContext previous output
+
+captureFunctionContext :: TacM FunctionContext
+captureFunctionContext = do
+  st <- State.get
+  pure
+    FunctionContext
+      { contextMethodName = currentMethodName st
+      , contextLocalOffset = localOffset st
+      , contextLocals = locals st
+      , contextInstructions = instructions st
+      , contextLoopLabels = loopLabels st
+      , contextCaseLabels = caseLabels st
+      }
+
+enterFunctionContext :: Text -> [(Text, LocalInfo)] -> TacM ()
+enterFunctionContext name params =
+  State.modify $
+    \st ->
+      st
+        { currentMethodName = name
+        , localOffset = 0
+        , locals = Map.fromList params
+        , instructions = Seq.empty
+        , loopLabels = []
+        , caseLabels = []
+        }
+
+currentMethodOutput :: Text -> TacM MethodOutput
+currentMethodOutput name = do
+  st <- State.get
+  pure
+    MethodOutput
+      { methodOutputName = name
+      , methodOutputInstructions = toList (instructions st)
+      , methodOutputLocalSize = localOffset st
+      }
+
+restoreFunctionContext :: FunctionContext -> MethodOutput -> TacM ()
+restoreFunctionContext previous output =
+  State.modify $
+    \st ->
+      st
+        { methods = output : methods st
+        , currentMethodName = contextMethodName previous
+        , localOffset = contextLocalOffset previous
+        , locals = contextLocals previous
+        , instructions = contextInstructions previous
+        , loopLabels = contextLoopLabels previous
+        , caseLabels = contextCaseLabels previous
+        }
 
 emitBlock :: Node -> TacM ()
-emitBlock block = mapM_ emitStatementWithBreakpoint (childNodes block)
+emitBlock block = withLocalScope (mapM_ emitStatementWithBreakpoint (childNodes block))
+
+withLocalScope :: TacM a -> TacM a
+withLocalScope action = do
+  previousLocals <- locals <$> State.get
+  result <- action
+  State.modify (\st -> st {locals = previousLocals})
+  pure result
 
 emitStatementWithBreakpoint :: Node -> TacM ()
 emitStatementWithBreakpoint statement = do
@@ -224,35 +271,35 @@ emitStatementWithBreakpoint statement = do
 
 maybeEmitBreakpoint :: Node -> TacM ()
 maybeEmitBreakpoint statement = do
-  st <- get
+  st <- State.get
   case drop (breakpointIndex st) (breakpoints st) of
     breakpoint : _ | fromIntegral (row (nodePos statement)) > breakpoint - 1 -> do
-      emit "!debug_breakpoint" [("target", Place "i" (show breakpoint))]
-      modify' (\s -> s {breakpointIndex = breakpointIndex s + 1})
+      emit IDebugBreakpoint [("target", Place "i" (Text.pack (show breakpoint)))]
+      State.modify (\s -> s {breakpointIndex = breakpointIndex s + 1})
     _ -> pure ()
 
 emitStatement :: Node -> TacM ()
 emitStatement statement = do
   child <- fieldNode "child" statement
-  case nodeName child of
-    "DECLARATION" -> emitDeclaration child
-    "EXPRESSION" -> void (emitExpression child)
-    "IF" -> emitIf child
-    "BLOCK" -> emitBlock child
-    "WHILE" -> emitWhile child
-    "DO_WHILE" -> emitDoWhile child
-    "FOR" -> emitFor child
-    "BREAK" -> emitBreak
-    "CONTINUE" -> emitContinue
-    "SWITCH" -> emitSwitch child
-    "CASE" -> emitCase child
-    "DEFAULT" -> emitDefault child
-    "GOTO" -> emitGoto child
-    "LABEL" -> emitLabel child
-    "ASM" -> emitAsm child
-    "RETURN" -> emitReturn child
-    "EMPTY_STATEMENT" -> pure ()
-    other -> throw ("simple TAC does not support statement: " <> other)
+  case nodeKind child of
+    NodeDeclaration -> emitDeclaration child
+    NodeExpression -> void (emitExpression child)
+    NodeIf -> emitIf child
+    NodeBlock -> emitBlock child
+    NodeWhile -> emitWhile child
+    NodeDoWhile -> emitDoWhile child
+    NodeFor -> emitFor child
+    NodeBreak -> emitBreak
+    NodeContinue -> emitContinue
+    NodeSwitch -> emitSwitch child
+    NodeCase -> emitCase child
+    NodeDefault -> emitDefault child
+    NodeGoto -> emitGoto child
+    NodeLabel -> emitLabel child
+    NodeAsm -> emitAsm child
+    NodeReturn -> emitReturn child
+    NodeEmptyStatement -> pure ()
+    _ -> throw ("simple TAC does not support statement: " <> nodeName child)
 
 emitDeclaration :: Node -> TacM ()
 emitDeclaration declaration = do
@@ -275,7 +322,7 @@ emitDeclaration declaration = do
         else nextLocalSize (objectSlotSize dimensions declaredTy)
     let name = declaratorName declarator
         info = LocalInfo place pointerLevel dimensions (declaratorPointerToArray declarator) declaredTy
-    modify' (\st -> st {locals = Map.insert name info (locals st)})
+    State.modify (\st -> st {locals = Map.insert name info (locals st)})
     case initializer of
       Just initNode -> do
         source <- emitInitializer initNode
@@ -283,7 +330,7 @@ emitDeclaration declaration = do
         pure ()
       Nothing -> pure ()
 
-declarationStorageKind :: Node -> TacM String
+declarationStorageKind :: Node -> TacM Text
 declarationStorageKind declaration = do
   specifier <- fieldNode "specifier" declaration
   storage <- fieldNode "storage_class" specifier
@@ -297,18 +344,18 @@ emitInitializer initializer =
 
 simulateGlobalInitializer :: Place -> Node -> TacM ()
 simulateGlobalInitializer place initializer
-  | nodeName initializer == "INITIALIZER" =
+  | nodeIs NodeInitializer initializer =
       case fieldNodeMaybe "value" initializer of
         Just value
-          | nodeName value `elem` ["INT", "CHARACTER", "STRING_LITERAL"] -> pure ()
+          | nodeKind value `elem` [NodeInt, NodeCharacter, NodeStringLiteral] -> pure ()
           | otherwise -> do
               source <- emitAssignmentExpression value
               _ <- emitMove source place
               pure ()
         Nothing -> pure ()
-  | nodeName initializer == "INITIALIZER_LIST" =
+  | nodeIs NodeInitializerList initializer =
       forM_ (zip [(0 :: Integer) ..] (childNodes initializer)) $ \(offset, child) ->
-        simulateGlobalInitializer (place {placeValue = show (placeInteger place + offset)}) child
+        simulateGlobalInitializer (place {placeValue = Text.pack (show (placeInteger place + offset))}) child
   | otherwise = pure ()
 
 emitReturn :: Node -> TacM ()
@@ -319,9 +366,9 @@ emitReturn node = do
     if isLValue place
       then loadOperandIntoRegister place
       else pure place
-  emit "mov" [("source", source), ("dest", Place "r" "return_reg")]
-  method <- currentMethodName <$> get
-  emit "jmp" [("target", Place "i" (".exit_" <> method))]
+  emit IMov [("source", source), ("dest", Place "r" "return_reg")]
+  method <- currentMethodName <$> State.get
+  emit IJmp [("target", Place "i" (".exit_" <> method))]
 
 emitIf :: Node -> TacM ()
 emitIf node = do
@@ -330,26 +377,26 @@ emitIf node = do
   endLabel <- nextLabel
   condition <- fieldNode "condition" node >>= firstExpressionChild
   emitBoolControlFlow condition trueLabel falseLabel
-  emit "label" [("target", trueLabel)]
+  emit ILabel [("target", trueLabel)]
   fieldNode "true_case" node >>= emitStatement
-  emit "jmp" [("target", endLabel)]
-  emit "label" [("target", falseLabel)]
+  emit IJmp [("target", endLabel)]
+  emit ILabel [("target", falseLabel)]
   maybe (pure ()) emitStatement (fieldNodeMaybe "false_case" node)
-  emit "label" [("target", endLabel)]
+  emit ILabel [("target", endLabel)]
 
 emitWhile :: Node -> TacM ()
 emitWhile node = do
   startLabel <- nextLabel
   endLabel <- nextLabel
   pushLoopLabels startLabel endLabel
-  emit "label" [("target", startLabel)]
+  emit ILabel [("target", startLabel)]
   trueLabel <- nextLabel
   condition <- fieldNode "condition" node >>= firstExpressionChild
   emitBoolControlFlow condition trueLabel endLabel
-  emit "label" [("target", trueLabel)]
+  emit ILabel [("target", trueLabel)]
   fieldNode "statement" node >>= emitStatement
-  emit "jmp" [("target", startLabel)]
-  emit "label" [("target", endLabel)]
+  emit IJmp [("target", startLabel)]
+  emit ILabel [("target", endLabel)]
   popLoopLabels
 
 emitDoWhile :: Node -> TacM ()
@@ -358,45 +405,45 @@ emitDoWhile node = do
   conditionLabel <- nextLabel
   endLabel <- nextLabel
   pushLoopLabels conditionLabel endLabel
-  emit "label" [("target", startLabel)]
+  emit ILabel [("target", startLabel)]
   fieldNode "statement" node >>= emitStatement
-  emit "label" [("target", conditionLabel)]
+  emit ILabel [("target", conditionLabel)]
   condition <- fieldNode "condition" node >>= firstExpressionChild
   emitBoolControlFlow condition startLabel endLabel
-  emit "label" [("target", endLabel)]
+  emit ILabel [("target", endLabel)]
   popLoopLabels
 
 emitFor :: Node -> TacM ()
-emitFor node = do
+emitFor node = withLocalScope $ do
   startLabel <- nextLabel
   updateLabel <- nextLabel
   endLabel <- nextLabel
   pushLoopLabels updateLabel endLabel
   maybe (pure ()) emitForInitialization (fieldNodeMaybe "initialization" node)
-  emit "label" [("target", startLabel)]
+  emit ILabel [("target", startLabel)]
   trueLabel <- nextLabel
   case fieldNodeMaybe "condition" node of
     Just condition -> firstExpressionChild condition >>= \child -> emitBoolControlFlow child trueLabel endLabel
     Nothing -> pure ()
-  emit "label" [("target", trueLabel)]
+  emit ILabel [("target", trueLabel)]
   fieldNode "statement" node >>= emitStatement
-  emit "label" [("target", updateLabel)]
+  emit ILabel [("target", updateLabel)]
   maybe (pure ()) (void . emitExpression) (fieldNodeMaybe "update" node)
-  emit "jmp" [("target", startLabel)]
-  emit "label" [("target", endLabel)]
+  emit IJmp [("target", startLabel)]
+  emit ILabel [("target", endLabel)]
   popLoopLabels
 
 emitForInitialization :: Node -> TacM ()
 emitForInitialization node =
-  case nodeName node of
-    "DECLARATION" -> emitDeclaration node
+  case nodeKind node of
+    NodeDeclaration -> emitDeclaration node
     _ -> void (emitExpression node)
 
 emitSwitch :: Node -> TacM ()
 emitSwitch node = do
   condition <- fieldNode "condition" node >>= emitExpression >>= loadOperandIntoRegister
   endLabel <- nextLabel
-  mark <- Seq.length . instructions <$> get
+  mark <- Seq.length . instructions <$> State.get
   pushCaseLabels
   pushLoopLabels endLabel endLabel
   fieldNode "block" node >>= emitBlock
@@ -405,45 +452,45 @@ emitSwitch node = do
   let comparisons = concatMap (caseComparison condition) (caseEntries context)
       dispatch =
         comparisons
-          <> [ Instr "jmp" [("target", fromMaybe endLabel (caseDefault context))] []
+          <> [ Instr IJmp [("target", fromMaybe endLabel (caseDefault context))] []
              ]
   insertInstructionsAt mark dispatch
-  emit "label" [("target", endLabel)]
+  emit ILabel [("target", endLabel)]
 
 emitCase :: Node -> TacM ()
 emitCase node = do
   valueNode <- fieldNode "value" node
-  enumEnv <- map placeToConstant . Map.toList . enumConstants <$> get
-  let value = Place "i" (show (constantValue enumEnv valueNode))
+  enumEnv <- map placeToConstant . Map.toList . enumConstants <$> State.get
+  let value = Place "i" (Text.pack (show (constantValue enumEnv valueNode)))
   trueLabel <- nextLabel
   addCaseLabel value trueLabel
-  emit "label" [("target", trueLabel)]
+  emit ILabel [("target", trueLabel)]
   fieldNode "statement" node >>= emitStatement
 
 emitDefault :: Node -> TacM ()
 emitDefault node = do
   defaultLabel <- nextLabel
   setDefaultCaseLabel defaultLabel
-  emit "label" [("target", defaultLabel)]
+  emit ILabel [("target", defaultLabel)]
   fieldNode "statement" node >>= emitStatement
 
 emitGoto :: Node -> TacM ()
 emitGoto node = do
   target <- fieldNode "target" node
-  method <- currentMethodName <$> get
-  emit "jmp" [("target", Place "i" (methodLabel method (identifierValue target)))]
+  method <- currentMethodName <$> State.get
+  emit IJmp [("target", Place "i" (methodLabel method (identifierValue target)))]
 
 emitLabel :: Node -> TacM ()
 emitLabel node = do
   label <- fieldNode "label" node
-  method <- currentMethodName <$> get
-  emit "label" [("target", Place "i" (methodLabel method (identifierValue label)))]
+  method <- currentMethodName <$> State.get
+  emit ILabel [("target", Place "i" (methodLabel method (identifierValue label)))]
   fieldNode "statement" node >>= emitStatement
 
 caseComparison :: Place -> (Place, Place) -> [Instr]
 caseComparison condition (value, target) =
-  [ Instr "cmp" [("first", condition), ("second", value)] []
-  , Instr "je" [("target", target)] []
+  [ Instr ICmp [("first", condition), ("second", value)] []
+  , Instr IJe [("target", target)] []
   ]
 
 emitAsm :: Node -> TacM ()
@@ -451,19 +498,19 @@ emitAsm node = do
   maybe (pure ()) emitAsmClobbersPush (fieldNodeMaybe "clobbers" node)
   maybe (pure ()) emitAsmInputs (fieldNodeMaybe "inputs" node)
   asm <- fieldString "asm" node
-  emitString "asm" [("asm", asm)]
+  emitString IAsm [("asm", asm)]
   maybe (pure ()) emitAsmOutputs (fieldNodeMaybe "outputs" node)
   maybe (pure ()) emitAsmClobbersPop (fieldNodeMaybe "clobbers" node)
 
 emitAsmClobbersPush :: Node -> TacM ()
 emitAsmClobbersPush node =
   forM_ (childNodes node) $ \register ->
-    emit "push" [("target", registerPlace register)]
+    emit IPush [("target", registerPlace register)]
 
 emitAsmClobbersPop :: Node -> TacM ()
 emitAsmClobbersPop node =
   forM_ (reverse (childNodes node)) $ \register ->
-    emit "pop" [("target", registerPlace register)]
+    emit IPop [("target", registerPlace register)]
 
 emitAsmInputs :: Node -> TacM ()
 emitAsmInputs node = do
@@ -485,21 +532,21 @@ emitAsmOutputs node = do
 
 emitBreak :: TacM ()
 emitBreak = do
-  labels <- loopLabels <$> get
+  labels <- loopLabels <$> State.get
   case labels of
-    (_, endLabel) : _ -> emit "jmp" [("target", endLabel)]
+    (_, endLabel) : _ -> emit IJmp [("target", endLabel)]
     [] -> throw "break statement must be inside a loop"
 
 emitContinue :: TacM ()
 emitContinue = do
-  labels <- loopLabels <$> get
+  labels <- loopLabels <$> State.get
   case labels of
-    (updateLabel, _) : _ -> emit "jmp" [("target", updateLabel)]
+    (updateLabel, _) : _ -> emit IJmp [("target", updateLabel)]
     [] -> throw "continue statement must be inside a loop"
 
 emitExpression :: Node -> TacM Place
 emitExpression node
-  | nodeName node == "EXPRESSION" =
+  | nodeIs NodeExpression node =
       case childNodes node of
         [] -> throw "simple TAC empty expression"
         children -> emitExpressionChildren children
@@ -513,7 +560,7 @@ emitExpressionChildren (child : children) =
 
 emitAssignmentExpression :: Node -> TacM Place
 emitAssignmentExpression node
-  | nodeName node == "ASSIGNMENT" = do
+  | nodeIs NodeAssignment node = do
       op <- fieldString "op" node
       lhs <- fieldNode "lhs" node >>= emitTernaryExpression
       rhs <- fieldNode "rhs" node >>= emitAssignmentExpression
@@ -530,7 +577,7 @@ emitAssignmentExpression node
         _ -> emitCompoundAssignment op lhs rhs
   | otherwise = emitTernaryExpression node
 
-emitCompoundAssignment :: String -> Place -> Place -> TacM Place
+emitCompoundAssignment :: Text -> Place -> Place -> TacM Place
 emitCompoundAssignment op lhs rhs = do
   operationType <- compoundOperationType op
   lhsPlace <-
@@ -548,65 +595,65 @@ emitCompoundAssignment op lhs rhs = do
 
 emitTernaryExpression :: Node -> TacM Place
 emitTernaryExpression node
-  | nodeName node == "TERNARY" = do
+  | nodeIs NodeTernary node = do
       falseLabel <- nextLabel
       trueLabel <- nextLabel
       endLabel <- nextLabel
       condition <- fieldNode "condition" node
       emitBoolControlFlow condition trueLabel falseLabel
-      emit "label" [("target", trueLabel)]
+      emit ILabel [("target", trueLabel)]
       truePlace <- fieldNode "true_case" node >>= emitAssignmentExpression
       result <- nextTemp
       _ <- emitMove truePlace result
-      emit "jmp" [("target", endLabel)]
-      emit "label" [("target", falseLabel)]
+      emit IJmp [("target", endLabel)]
+      emit ILabel [("target", falseLabel)]
       falsePlace <- fieldNode "false_case" node >>= emitBoolRValue
       _ <- emitMove falsePlace result
-      emit "label" [("target", endLabel)]
+      emit ILabel [("target", endLabel)]
       pure result
   | otherwise = emitBoolRValue node
 
 emitInclusiveOrExpression :: Node -> TacM Place
 emitInclusiveOrExpression node
-  | nodeName node == "INCLUSIVE_OR_EXPRESSION" = do
+  | nodeIs NodeInclusiveOrExpression node = do
       firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitInclusiveXorExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveXorExpression "or"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveXorExpression IOr
   | otherwise = emitInclusiveXorExpression node
 
 emitInclusiveXorExpression :: Node -> TacM Place
 emitInclusiveXorExpression node
-  | nodeName node == "INCLUSIVE_XOR_EXPRESSION" = do
+  | nodeIs NodeInclusiveXorExpression node = do
       firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitInclusiveAndExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveAndExpression "xor"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveAndExpression IXor
   | otherwise = emitInclusiveAndExpression node
 
 emitInclusiveAndExpression :: Node -> TacM Place
 emitInclusiveAndExpression node
-  | nodeName node == "INCLUSIVE_AND_EXPRESSION" = do
+  | nodeIs NodeInclusiveAndExpression node = do
       firstNode <- childNodeAt 0 (nodeChildren node)
       firstPlace <- emitEqualityValue firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitEqualityValue "and"
+      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitEqualityValue IAnd
   | otherwise = emitEqualityValue node
 
 emitEqualityValue :: Node -> TacM Place
 emitEqualityValue node
-  | nodeName node == "EQUALITY_EXPRESSION" =
+  | nodeIs NodeEqualityExpression node =
       materializeBool $ \trueLabel falseLabel ->
         emitEqualityControl node trueLabel falseLabel
   | otherwise = emitRelationalValue node
 
 emitRelationalValue :: Node -> TacM Place
 emitRelationalValue node
-  | nodeName node == "RELATIONAL_EXPRESSION" =
+  | nodeIs NodeRelationalExpression node =
       materializeBool $ \trueLabel falseLabel ->
         emitRelationalControl node trueLabel falseLabel
   | otherwise = emitShiftExpression node
 
 emitShiftExpression :: Node -> TacM Place
 emitShiftExpression node
-  | nodeName node == "SHIFT_EXPRESSION" = do
+  | nodeIs NodeShiftExpression node = do
       let children = nodeChildren node
       firstNode <- childNodeAt 0 children
       firstPlace <- emitSumExpression firstNode >>= loadOperandIntoRegister
@@ -628,30 +675,30 @@ materializeBool emitControl = do
   endLabel <- nextLabel
   emitControl trueLabel falseLabel
   result <- nextTemp
-  emit "label" [("target", trueLabel)]
-  emit "mov" [("source", Place "i" "1"), ("dest", result)]
-  emit "jmp" [("target", endLabel)]
-  emit "label" [("target", falseLabel)]
-  emit "mov" [("source", Place "i" "0"), ("dest", result)]
-  emit "label" [("target", endLabel)]
+  emit ILabel [("target", trueLabel)]
+  emit IMov [("source", Place "i" "1"), ("dest", result)]
+  emit IJmp [("target", endLabel)]
+  emit ILabel [("target", falseLabel)]
+  emit IMov [("source", Place "i" "0"), ("dest", result)]
+  emit ILabel [("target", endLabel)]
   pure result
 
 emitBoolControlFlow :: Node -> Place -> Place -> TacM ()
 emitBoolControlFlow node trueLabel falseLabel =
-  case nodeName node of
-    "EQUALITY_EXPRESSION" -> emitEqualityControl node trueLabel falseLabel
-    "RELATIONAL_EXPRESSION" -> emitRelationalControl node trueLabel falseLabel
-    "LOGICAL_AND_EXPRESSION" -> emitLogicalAndControl node trueLabel falseLabel
-    "LOGICAL_OR_EXPRESSION" -> emitLogicalOrControl node trueLabel falseLabel
+  case nodeKind node of
+    NodeEqualityExpression -> emitEqualityControl node trueLabel falseLabel
+    NodeRelationalExpression -> emitRelationalControl node trueLabel falseLabel
+    NodeLogicalAndExpression -> emitLogicalAndControl node trueLabel falseLabel
+    NodeLogicalOrExpression -> emitLogicalOrControl node trueLabel falseLabel
     _ -> do
       value <- emitBoolRValue node >>= loadOperandIntoReadOnlyRegister
-      emit "cmp" [("first", value), ("second", Place "i" "0")]
-      emit "je" [("target", falseLabel)]
-      emit "jmp" [("target", trueLabel)]
+      emit ICmp [("first", value), ("second", Place "i" "0")]
+      emit IJe [("target", falseLabel)]
+      emit IJmp [("target", trueLabel)]
 
 emitLogicalAndControl :: Node -> Place -> Place -> TacM ()
 emitLogicalAndControl node trueLabel falseLabel
-  | nodeName node == "LOGICAL_AND_EXPRESSION" =
+  | nodeIs NodeLogicalAndExpression node =
       case childNodes node of
         [] -> throw "malformed logical and expression"
         children -> emitAndChain children
@@ -661,13 +708,13 @@ emitLogicalAndControl node trueLabel falseLabel
     emitAndChain (child : rest) = do
       tempTrue <- nextLabel
       emitBoolControlFlow child tempTrue falseLabel
-      emit "label" [("target", tempTrue)]
+      emit ILabel [("target", tempTrue)]
       emitAndChain rest
     emitAndChain [] = throw "malformed logical and expression"
 
 emitLogicalOrControl :: Node -> Place -> Place -> TacM ()
 emitLogicalOrControl node trueLabel falseLabel
-  | nodeName node == "LOGICAL_OR_EXPRESSION" =
+  | nodeIs NodeLogicalOrExpression node =
       case childNodes node of
         [] -> throw "malformed logical or expression"
         children -> emitOrChain children
@@ -677,28 +724,29 @@ emitLogicalOrControl node trueLabel falseLabel
     emitOrChain (child : rest) = do
       tempFalse <- nextLabel
       emitBoolControlFlow child trueLabel tempFalse
-      emit "label" [("target", tempFalse)]
+      emit ILabel [("target", tempFalse)]
       emitOrChain rest
     emitOrChain [] = throw "malformed logical or expression"
 
 emitEqualityControl :: Node -> Place -> Place -> TacM ()
 emitEqualityControl node trueLabel falseLabel
-  | nodeName node == "EQUALITY_EXPRESSION" =
-      emitComparisonControl equalityJump node trueLabel falseLabel
+  | nodeIs NodeEqualityExpression node =
+      emitComparisonControl comparisonJump node trueLabel falseLabel
   | otherwise = emitRelationalControl node trueLabel falseLabel
 
 emitRelationalControl :: Node -> Place -> Place -> TacM ()
 emitRelationalControl node trueLabel falseLabel
-  | nodeName node == "RELATIONAL_EXPRESSION" =
-      emitComparisonControl signedRelationalJump node trueLabel falseLabel
+  | nodeIs NodeRelationalExpression node =
+      emitComparisonControl comparisonJump node trueLabel falseLabel
   | otherwise = do
       value <- emitShiftExpression node
       emitConditionalResultJump value trueLabel falseLabel
 
-emitComparisonControl :: (String -> TacM String) -> Node -> Place -> Place -> TacM ()
+emitComparisonControl :: (Text -> CType -> CType -> TacM InstrType) -> Node -> Place -> Place -> TacM ()
 emitComparisonControl jumpFor node trueLabel falseLabel = do
   let children = nodeChildren node
   firstNode <- childNodeAt 0 children
+  firstTy <- inferExpressionType firstNode
   tempPlace <- emitBoolRValue firstNode >>= loadOperandIntoRegister
   groups <- comparisonGroups (drop 1 children)
   case groups of
@@ -707,37 +755,45 @@ emitComparisonControl jumpFor node trueLabel falseLabel = do
       case splitLast groups of
         Nothing -> throw "malformed comparison expression"
         Just (intermediate, finalGroup) -> do
-          forM_ intermediate $ \(op, rhs) -> do
-            nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
-            jumpType <- jumpFor op
-            emitConditionalEvaluation tempPlace nextReg tempPlace jumpType
+          lhsTy <- foldComparisonIntermediates jumpFor tempPlace firstTy intermediate
           let (op, rhs) = finalGroup
+          rhsTy <- inferExpressionType rhs
           nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
-          jumpType <- jumpFor op
-          emit "cmp" [("first", tempPlace), ("second", nextReg)]
+          jumpType <- jumpFor op lhsTy rhsTy
+          emit ICmp [("first", tempPlace), ("second", nextReg)]
           emit jumpType [("target", trueLabel)]
-          emit "jmp" [("target", falseLabel)]
+          emit IJmp [("target", falseLabel)]
 
-emitConditionalEvaluation :: Place -> Place -> Place -> String -> TacM ()
+foldComparisonIntermediates :: (Text -> CType -> CType -> TacM InstrType) -> Place -> CType -> [(Text, Node)] -> TacM CType
+foldComparisonIntermediates jumpFor tempPlace = foldM step
+  where
+    step lhsTy (op, rhs) = do
+      rhsTy <- inferExpressionType rhs
+      jumpType <- jumpFor op lhsTy rhsTy
+      nextReg <- emitBoolRValue rhs >>= loadOperandIntoReadOnlyRegister
+      emitConditionalEvaluation tempPlace nextReg tempPlace jumpType
+      pure (base "INT")
+
+emitConditionalEvaluation :: Place -> Place -> Place -> InstrType -> TacM ()
 emitConditionalEvaluation first second result jumpType = do
   trueLabel <- nextLabel
   endLabel <- nextLabel
-  emit "cmp" [("first", first), ("second", second)]
+  emit ICmp [("first", first), ("second", second)]
   emit jumpType [("target", trueLabel)]
   _ <- emitMove (Place "i" "0") result
-  emit "jmp" [("target", endLabel)]
-  emit "label" [("target", trueLabel)]
+  emit IJmp [("target", endLabel)]
+  emit ILabel [("target", trueLabel)]
   _ <- emitMove (Place "i" "1") result
-  emit "label" [("target", endLabel)]
+  emit ILabel [("target", endLabel)]
 
 emitConditionalResultJump :: Place -> Place -> Place -> TacM ()
 emitConditionalResultJump result trueLabel falseLabel = do
   checked <- loadOperandIntoReadOnlyRegister result
-  emit "cmp" [("first", checked), ("second", Place "i" "0")]
-  emit "je" [("target", falseLabel)]
-  emit "jmp" [("target", trueLabel)]
+  emit ICmp [("first", checked), ("second", Place "i" "0")]
+  emit IJe [("target", falseLabel)]
+  emit IJmp [("target", trueLabel)]
 
-emitFlatInfix :: Place -> [Node] -> (Node -> TacM Place) -> String -> TacM Place
+emitFlatInfix :: Place -> [Node] -> (Node -> TacM Place) -> InstrType -> TacM Place
 emitFlatInfix acc [] _ _ = pure acc
 emitFlatInfix acc (rhs : rest) emitChild op = do
   rhsPlace <- emitChild rhs >>= loadOperandIntoRegister
@@ -746,7 +802,7 @@ emitFlatInfix acc (rhs : rest) emitChild op = do
 
 emitSumExpression :: Node -> TacM Place
 emitSumExpression node
-  | nodeName node == "SUM_EXPRESSION" = do
+  | nodeIs NodeSumExpression node = do
       let children = nodeChildren node
       firstNode <- childNodeAt 0 children
       firstPlace <- emitTerm firstNode >>= loadOperandIntoRegister
@@ -762,15 +818,15 @@ emitSumRest acc (ChildToken token : ChildNode rhs : rest) = do
       then pure rhsPlace0
       else loadOperandIntoRegister rhsPlace0
   case tokenName token of
-    "+" -> emit "add" [("source", rhsPlace), ("dest", acc)]
-    "-" -> emit "sub" [("source", rhsPlace), ("dest", acc)]
+    "+" -> emit IAdd [("source", rhsPlace), ("dest", acc)]
+    "-" -> emit ISub [("source", rhsPlace), ("dest", acc)]
     op -> throw ("simple TAC unsupported sum op: " <> op)
   emitSumRest acc rest
 emitSumRest _ _ = throw "malformed sum expression"
 
 emitTerm :: Node -> TacM Place
 emitTerm node
-  | nodeName node == "MULTIPLICATIVE_EXPRESSION" = do
+  | nodeIs NodeMultiplicativeExpression node = do
       let children = nodeChildren node
       firstNode <- childNodeAt 0 children
       firstPlace0 <- emitCastExpression firstNode
@@ -791,7 +847,7 @@ emitTermRest acc (ChildToken token : ChildNode rhs : rest) = do
       else pure rhsPlace0
   case tokenName token of
     "*" -> do
-      emit "mull" [("source", rhsPlace), ("dest", acc)]
+      emit IMull [("source", rhsPlace), ("dest", acc)]
       emitTermRest acc rest
     "/" -> do
       (quotient, _) <- emitDivision acc rhsPlace
@@ -819,18 +875,28 @@ emitDivision dividend0 divisor0 = do
 
 emitFixedPointDivision :: Place -> Place -> TacM (Place, Place)
 emitFixedPointDivision dividend divisor = do
-  let fixedPointFactor = (2 ^ (16 :: Int)) `div` placeInteger divisor
+  let divisorValue = placeInteger divisor
+  when (divisorValue == 0) $
+    throw "division by constant zero"
+  if divisorValue == 1
+    then pure (dividend, Place "i" "0")
+    else emitReciprocalDivision dividend divisor divisorValue
+
+emitReciprocalDivision :: Place -> Place -> Integer -> TacM (Place, Place)
+emitReciprocalDivision dividend divisor divisorValue = do
+  let fixedPointFactor = (2 ^ (16 :: Int)) `div` divisorValue
   quotient <- nextTemp
   remainder <- nextTemp
   endLabel <- nextLabel
-  emit "mulh" [("source", dividend), ("dest", quotient), ("third", Place "i" (show fixedPointFactor))]
-  emit "mull3" [("source", quotient), ("dest", remainder), ("third", divisor)]
-  emit "sub3" [("source", dividend), ("dest", remainder), ("third", remainder)]
-  emit "cmp" [("first", remainder), ("second", divisor)]
-  emit "ja" [("target", endLabel)]
-  emit "add" [("source", Place "i" "1"), ("dest", quotient)]
-  emit "sub" [("source", divisor), ("dest", remainder)]
-  emit "label" [("target", endLabel)]
+  divisorForCompare <- loadOperandIntoRegister divisor
+  emit IMulh [("source", dividend), ("dest", quotient), ("third", Place "i" (Text.pack (show fixedPointFactor)))]
+  emit IMull3 [("source", quotient), ("dest", remainder), ("third", divisor)]
+  emit ISub3 [("source", dividend), ("dest", remainder), ("third", remainder)]
+  emit ICmp [("first", remainder), ("second", divisorForCompare)]
+  emit IJb [("target", endLabel)]
+  emit IAdd [("source", Place "i" "1"), ("dest", quotient)]
+  emit ISub [("source", divisor), ("dest", remainder)]
+  emit ILabel [("target", endLabel)]
   pure (quotient, remainder)
 
 emitLongDivision :: Place -> Place -> TacM (Place, Place)
@@ -842,26 +908,26 @@ emitLongDivision dividend divisor = do
   temp <- nextTemp
   remainderLessLabel <- nextLabel
   endLabel <- nextLabel
-  emit "mov" [("source", Place "i" "0"), ("dest", quotient)]
-  emit "mov" [("source", Place "i" "0"), ("dest", remainder)]
-  emit "mov" [("source", Place "i" "15"), ("dest", bitIndex)]
-  emit "label" [("target", loopLabel)]
-  emit "cmp" [("first", bitIndex), ("second", Place "i" "0")]
-  emit "jl" [("target", endLabel)]
-  emit "shl" [("source", Place "i" "1"), ("dest", remainder)]
-  emit "shr3" [("source", dividend), ("dest", temp), ("third", bitIndex)]
-  emit "and" [("source", Place "i" "1"), ("dest", temp)]
-  emit "or" [("source", temp), ("dest", remainder)]
-  emit "cmp" [("first", remainder), ("second", divisor)]
-  emit "jl" [("target", remainderLessLabel)]
-  emit "sub" [("source", divisor), ("dest", remainder)]
-  emit "mov" [("source", Place "i" "1"), ("dest", temp)]
-  emit "shl" [("source", bitIndex), ("dest", temp)]
-  emit "or" [("source", temp), ("dest", quotient)]
-  emit "label" [("target", remainderLessLabel)]
-  emit "sub" [("source", Place "i" "1"), ("dest", bitIndex)]
-  emit "jmp" [("target", loopLabel)]
-  emit "label" [("target", endLabel)]
+  emit IMov [("source", Place "i" "0"), ("dest", quotient)]
+  emit IMov [("source", Place "i" "0"), ("dest", remainder)]
+  emit IMov [("source", Place "i" "15"), ("dest", bitIndex)]
+  emit ILabel [("target", loopLabel)]
+  emit ICmp [("first", bitIndex), ("second", Place "i" "0")]
+  emit IJl [("target", endLabel)]
+  emit IShl [("source", Place "i" "1"), ("dest", remainder)]
+  emit IShr3 [("source", dividend), ("dest", temp), ("third", bitIndex)]
+  emit IAnd [("source", Place "i" "1"), ("dest", temp)]
+  emit IOr [("source", temp), ("dest", remainder)]
+  emit ICmp [("first", remainder), ("second", divisor)]
+  emit IJb [("target", remainderLessLabel)]
+  emit ISub [("source", divisor), ("dest", remainder)]
+  emit IMov [("source", Place "i" "1"), ("dest", temp)]
+  emit IShl [("source", bitIndex), ("dest", temp)]
+  emit IOr [("source", temp), ("dest", quotient)]
+  emit ILabel [("target", remainderLessLabel)]
+  emit ISub [("source", Place "i" "1"), ("dest", bitIndex)]
+  emit IJmp [("target", loopLabel)]
+  emit ILabel [("target", endLabel)]
   pure (quotient, remainder)
 
 emitShiftRest :: Place -> Place -> [NodeChild] -> TacM Place
@@ -873,25 +939,25 @@ emitShiftRest acc luaNextReg (ChildToken token : ChildNode rhs : rest) = do
       then pure rhsPlace0
       else emitMove rhsPlace0 luaNextReg
   case tokenName token of
-    "<<" -> emit "shl" [("source", rhsPlace), ("dest", acc)]
-    ">>" -> emit "shr" [("source", rhsPlace), ("dest", acc)]
+    "<<" -> emit IShl [("source", rhsPlace), ("dest", acc)]
+    ">>" -> emit IShr [("source", rhsPlace), ("dest", acc)]
     op -> throw ("simple TAC unsupported shift op: " <> op)
   emitShiftRest acc rhsPlace rest
 emitShiftRest _ _ _ = throw "malformed shift expression"
 
 emitCastExpression :: Node -> TacM Place
 emitCastExpression node
-  | nodeName node == "CAST_EXPRESSION" = fieldNode "cast_expression" node >>= emitCastExpression
+  | nodeIs NodeCastExpression node = fieldNode "cast_expression" node >>= emitCastExpression
   | otherwise = emitUnaryExpression node
 
 emitUnaryExpression :: Node -> TacM Place
 emitUnaryExpression node
-  | nodeName node == "UNARY_EXPRESSION" = do
+  | nodeIs NodeUnaryExpression node = do
       op <- fieldString "operator" node
       child <- fieldNode "child" node
       case op of
-        "++" -> emitPrefixMutation child "add"
-        "--" -> emitPrefixMutation child "sub"
+        "++" -> emitPrefixMutation child IAdd
+        "--" -> emitPrefixMutation child ISub
         "SIZEOF" -> pure (Place "i" "1")
         "&" -> emitCastExpression child >>= emitAddressOf
         "*" -> emitCastExpression child >>= emitDereference
@@ -899,24 +965,24 @@ emitUnaryExpression node
         "-" -> do
           childPlace <- emitCastExpression child
           if placeType childPlace == "i"
-            then pure (Place "i" (show (65536 - placeInteger childPlace)))
+            then pure (Place "i" (Text.pack (show (65536 - placeInteger childPlace))))
             else do
               result <- loadOperandIntoRegister childPlace
-              emit "xor" [("source", Place "i" "65535"), ("dest", result)]
-              emit "add" [("source", Place "i" "1"), ("dest", result)]
+              emit IXor [("source", Place "i" "65535"), ("dest", result)]
+              emit IAdd [("source", Place "i" "1"), ("dest", result)]
               pure result
         "~" -> do
           childPlace <- emitCastExpression child >>= loadOperandIntoRegister
-          emit "xor" [("source", Place "i" "65535"), ("dest", childPlace)]
+          emit IXor [("source", Place "i" "65535"), ("dest", childPlace)]
           pure childPlace
         "!" -> do
           childPlace <- emitCastExpression child >>= loadOperandIntoRegister
-          emitConditionalEvaluation childPlace (Place "i" "0") childPlace "je"
+          emitConditionalEvaluation childPlace (Place "i" "0") childPlace IJe
           pure childPlace
         _ -> throw ("simple TAC does not support unary op: " <> op)
   | otherwise = emitPostfixExpression node
 
-emitPrefixMutation :: Node -> String -> TacM Place
+emitPrefixMutation :: Node -> InstrType -> TacM Place
 emitPrefixMutation child op = do
   childPlace <- emitUnaryExpression child
   nextReg <-
@@ -931,8 +997,8 @@ emitAddressOf :: Place -> TacM Place
 emitAddressOf place = do
   target <- nextTemp
   case placeType place of
-    _ | isMemoryLValue place -> emit "!get_address" [("dest", target), ("target", place)] >> pure target
-    "pr" -> emit "mov" [("source", place), ("dest", target)] >> pure target
+    _ | isMemoryLValue place -> emit IGetAddress [("dest", target), ("target", place)] >> pure target
+    "pr" -> emit IMov [("source", place), ("dest", target)] >> pure target
     "t" -> pure place
     _ -> throw ("simple TAC cannot take address of place type: " <> placeType place)
 
@@ -940,10 +1006,10 @@ emitDereference :: Place -> TacM Place
 emitDereference place = do
   pointerRegister <- nextPr
   case placeType place of
-    _ | not (isRValue place) -> emit "ld" [("source", place), ("dest", pointerRegister)] >> pure pointerRegister
+    _ | not (isRValue place) -> emit ILd [("source", place), ("dest", pointerRegister)] >> pure pointerRegister
     "vr" -> pointerFromRegister place
     "t" -> pointerFromRegister place
-    "i" -> emit "mov" [("source", place), ("dest", pointerRegister)] >> pure pointerRegister
+    "i" -> emit IMov [("source", place), ("dest", pointerRegister)] >> pure pointerRegister
     _ -> throw ("simple TAC cannot dereference place type: " <> placeType place)
   where
     pointerFromRegister register = do
@@ -952,7 +1018,7 @@ emitDereference place = do
 
 emitPostfixExpression :: Node -> TacM Place
 emitPostfixExpression node
-  | nodeName node == "POSTFIX_EXPRESSION" = do
+  | nodeIs NodePostfixExpression node = do
       primary <- fieldNode "primary_expression" node
       place <- emitPrimaryExpression primary
       context <- primaryPostfixContext primary
@@ -990,10 +1056,10 @@ emitPostfixOps place context (op : rest) = do
         whenBreakpointsEnabled $ do
           debugTarget <- nextTemp
           _ <- emitMove target debugTarget
-          emit "!debug_function_call" [("target", debugTarget)]
-        emit "call" [("target", target)]
+          emit IDebugFunctionCall [("target", debugTarget)]
+        emit ICall [("target", target)]
         unless isStandard $
-          emit "add" [("source", Place "i" (show (length args))), ("dest", Place "r" "stack_pointer")]
+          emit IAdd [("source", Place "i" (Text.pack (show (length args)))), ("dest", Place "r" "stack_pointer")]
         if callReturnsValue
           then do
             result <- nextTemp
@@ -1001,10 +1067,10 @@ emitPostfixOps place context (op : rest) = do
             pure (result, emptyPostfixContext)
           else pure (target, emptyPostfixContext)
       "++" -> do
-        mutated <- emitPostfixMutation place "add"
+        mutated <- emitPostfixMutation place IAdd
         pure (mutated, emptyPostfixContext)
       "--" -> do
-        mutated <- emitPostfixMutation place "sub"
+        mutated <- emitPostfixMutation place ISub
         pure (mutated, emptyPostfixContext)
       "." -> do
         (memberPlace, memberTy) <- emitMemberAccess place context op
@@ -1023,10 +1089,10 @@ emitMemberAccess place context op = do
   structTy <- maybe (throw ("simple TAC cannot infer type for member access: " <> memberName')) pure (contextType context)
   member <- maybe (throw ("missing member: " <> memberName')) pure (lookupMemberIn structTy memberName')
   offset <- maybe (throw ("missing member offset: " <> memberName')) pure (memberOffset member)
-  memberPlace <- emitOffsetLValue (Place "i" (show offset)) place 1
+  memberPlace <- emitOffsetLValue (Place "i" (Text.pack (show offset))) place 1
   pure (memberPlace, memberType member)
 
-lookupMemberIn :: CType -> String -> Maybe Member
+lookupMemberIn :: CType -> Text -> Maybe Member
 lookupMemberIn ty memberName' =
   case ty of
     StructType _ members' -> memberByName memberName' members'
@@ -1037,7 +1103,7 @@ emitPointerIndexing :: Place -> Place -> Integer -> TacM Place
 emitPointerIndexing pointerPlace indexer size
   | placeType pointerPlace == "vr" && (placeType indexer == "i" || (placeType indexer == "vr" && size == 1)) = do
       pointerRegister <- nextPr
-      emit "add3" [("source", pointerPlace), ("dest", pointerRegister), ("offset", scaledImmediate size indexer)]
+      emit IAdd3 [("source", pointerPlace), ("dest", pointerRegister), ("offset", scaledImmediate size indexer)]
       pure pointerRegister
   | otherwise = do
       dereferenced <- emitDereference pointerPlace
@@ -1063,30 +1129,30 @@ emitAbstractAdd :: Place -> Place -> Integer -> TacM Place
 emitAbstractAdd source dest size
   | not (isRegisterRValue dest || placeType dest == "pr") = throw "simple TAC indexed destination must be a register"
   | not (isRegisterRValue source || placeType source == "i") = throw "simple TAC indexed source must be an rvalue"
-  | placeType source == "i" = emit "add" [("source", scaledImmediate size source), ("dest", dest)] >> pure dest
+  | placeType source == "i" = emit IAdd [("source", scaledImmediate size source), ("dest", dest)] >> pure dest
   | size > 1 = do
       source' <-
         if placeType source == "vr"
           then loadOperandIntoRegister source
           else pure source
-      emit "mull" [("source", Place "i" (show size)), ("dest", source')]
-      emit "add" [("source", source'), ("dest", dest)]
+      emit IMull [("source", Place "i" (Text.pack (show size))), ("dest", source')]
+      emit IAdd [("source", source'), ("dest", dest)]
       pure dest
-  | otherwise = emit "add" [("source", source), ("dest", dest)] >> pure dest
+  | otherwise = emit IAdd [("source", source), ("dest", dest)] >> pure dest
 
 emitOffsetLValue :: Place -> Place -> Integer -> TacM Place
 emitOffsetLValue offset place size
   | placeType offset /= "i" = throw "simple TAC offset must be immediate"
   | placeType place == "pr" = do
-      emit "add" [("source", scaledImmediate size offset), ("dest", place)]
+      emit IAdd [("source", scaledImmediate size offset), ("dest", place)]
       pure place
   | isLValue place || placeType place == "i" =
-      pure (place {placeValue = show (placeInteger place + placeInteger offset * size)})
+      pure (place {placeValue = Text.pack (show (placeInteger place + placeInteger offset * size))})
   | otherwise = throw ("simple TAC cannot offset place type: " <> placeType place)
 
 scaledImmediate :: Integer -> Place -> Place
 scaledImmediate size place
-  | placeType place == "i" = Place "i" (show (placeInteger place * size))
+  | placeType place == "i" = Place "i" (Text.pack (show (placeInteger place * size)))
   | otherwise = place
 
 emitArgumentList :: Bool -> [Node] -> TacM ()
@@ -1108,18 +1174,18 @@ emitArgument arg = do
     if not (isRegisterRValue place) || placeType place == "i"
       then loadOperandIntoRegister place
       else pure place
-  emit "push" [("target", pushed)]
+  emit IPush [("target", pushed)]
 
 whenBreakpointsEnabled :: TacM () -> TacM ()
 whenBreakpointsEnabled action = do
-  enabled <- not . null . breakpoints <$> get
+  enabled <- not . null . breakpoints <$> State.get
   when enabled action
 
 postfixArgumentNodes :: PostfixOp -> TacM [Node]
 postfixArgumentNodes op =
   case postfixValue op of
     Just (NodeRef node)
-      | nodeName node == "ARGUMENT_LIST" -> pure (childNodes node)
+      | nodeIs NodeArgumentList node -> pure (childNodes node)
     Just (NodeList nodes) -> pure nodes
     Nothing -> pure []
     _ -> throw "malformed postfix argument list"
@@ -1147,7 +1213,7 @@ asmCSymbolPlace arg = do
 registerPlace :: Node -> Place
 registerPlace node = Place "r" (fieldStringDefault "id" "" node)
 
-emitPostfixMutation :: Place -> String -> TacM Place
+emitPostfixMutation :: Place -> InstrType -> TacM Place
 emitPostfixMutation place op = do
   nextReg <- loadOperandIntoRegister place
   if isRegisterRValue place
@@ -1163,15 +1229,15 @@ emitPostfixMutation place op = do
 
 emitPrimaryExpression :: Node -> TacM Place
 emitPrimaryExpression node =
-  case nodeName node of
-    "INT" -> pure (Place "i" (show (fieldIntDefault "value" 0 node)))
-    "CHARACTER" -> pure (Place "i" (characterValue node))
-    "IDENTIFIER" -> lookupLocal (fieldStringDefault "value" (identifierValue node) node)
-    "EXPRESSION" -> emitExpression node
-    "STRING_LITERAL" -> do
+  case nodeKind node of
+    NodeInt -> pure (Place "i" (Text.pack (show (fieldIntDefault "value" 0 node))))
+    NodeCharacter -> pure (Place "i" (characterValue node))
+    NodeIdentifier -> lookupLocal (fieldStringDefault "value" (identifierValue node) node)
+    NodeExpression -> emitExpression node
+    NodeStringLiteral -> do
       stringPlace <- nextGlobalSize (stringLiteralLength node)
       emitAddressOf stringPlace
-    other -> throw ("simple TAC does not support primary: " <> other)
+    _ -> throw ("simple TAC does not support primary: " <> nodeName node)
 
 emitMove :: Place -> Place -> TacM Place
 emitMove source dest
@@ -1180,9 +1246,9 @@ emitMove source dest
   | placeType source == "i" && isDestMem = do
       loaded <- loadOperandIntoRegister source
       emitMove loaded dest
-  | not isSourceMem && not isDestMem = emit "mov" [("source", source), ("dest", dest)] >> pure source
-  | not isSourceMem && isDestMem = emit "st" [("source", source), ("dest", dest)] >> pure source
-  | isSourceMem && not isDestMem = emit "ld" [("source", source), ("dest", dest)] >> pure source
+  | not isSourceMem && not isDestMem = emit IMov [("source", source), ("dest", dest)] >> pure source
+  | not isSourceMem && isDestMem = emit ISt [("source", source), ("dest", dest)] >> pure source
+  | isSourceMem && not isDestMem = emit ILd [("source", source), ("dest", dest)] >> pure source
   | otherwise = do
       loaded <- loadOperandIntoRegister source
       emitMove loaded dest
@@ -1205,45 +1271,40 @@ loadOperandIntoReadOnlyRegister place
 
 nextLocalSize :: Integer -> TacM Place
 nextLocalSize size = do
-  st <- get
+  st <- State.get
   let offset = localOffset st
-  modify' (\s -> s {localOffset = offset + size})
-  pure (Place "l" (show offset))
+  State.modify (\s -> s {localOffset = offset + size})
+  pure (Place "l" (Text.pack (show offset)))
 
 nextGlobalSize :: Integer -> TacM Place
 nextGlobalSize size = do
-  st <- get
+  st <- State.get
   let offset = globalOffset st
-  modify' (\s -> s {globalOffset = offset + size})
-  pure (Place "g" (show offset))
+  State.modify (\s -> s {globalOffset = offset + size})
+  pure (Place "g" (Text.pack (show offset)))
 
 nextTemp :: TacM Place
-nextTemp = do
-  st <- get
-  let next = tempCounter st + 1
-  modify' (\s -> s {tempCounter = next})
-  pure (Place "t" (show next))
+nextTemp = nextTempLike "t"
 
 nextPr :: TacM Place
-nextPr = do
-  st <- get
-  let next = tempCounter st + 1
-  modify' (\s -> s {tempCounter = next})
-  pure (Place "pr" (show next))
+nextPr = nextTempLike "pr"
 
 nextVR :: TacM Place
-nextVR = do
-  st <- get
+nextVR = nextTempLike "vr"
+
+nextTempLike :: Text -> TacM Place
+nextTempLike placeKind = do
+  st <- State.get
   let next = tempCounter st + 1
-  modify' (\s -> s {tempCounter = next})
-  pure (Place "vr" (show next))
+  State.modify (\s -> s {tempCounter = next})
+  pure (Place placeKind (Text.pack (show next)))
 
 nextLabel :: TacM Place
 nextLabel = do
-  st <- get
+  st <- State.get
   let next = labelCounter st
-  modify' (\s -> s {labelCounter = next + 1})
-  pure (Place "i" (".label_" <> show next))
+  State.modify (\s -> s {labelCounter = next + 1})
+  pure (Place "i" (".label_" <> Text.pack (show next)))
 
 standardArgumentRegister :: Int -> Place
 standardArgumentRegister index =
@@ -1252,7 +1313,7 @@ standardArgumentRegister index =
     2 -> Place "r" "r23"
     3 -> Place "r" "r24"
     4 -> Place "r" "r25"
-    _ -> Place "r" ("r" <> show (21 + index))
+    _ -> Place "r" ("r" <> Text.pack (show (21 + index)))
 
 isStandardFunctionPlace :: Place -> Bool
 isStandardFunctionPlace place =
@@ -1264,15 +1325,15 @@ standardFunctionReturnsValue place =
 
 userFunctionReturnsValue :: Place -> TacM Bool
 userFunctionReturnsValue place =
-  Map.findWithDefault True (placeValue place) . functionReturns <$> get
+  Map.findWithDefault True (placeValue place) . functionReturns <$> State.get
 
 pushLoopLabels :: Place -> Place -> TacM ()
 pushLoopLabels updateLabel endLabel =
-  modify' (\st -> st {loopLabels = (updateLabel, endLabel) : loopLabels st})
+  State.modify (\st -> st {loopLabels = (updateLabel, endLabel) : loopLabels st})
 
 popLoopLabels :: TacM ()
 popLoopLabels =
-  modify' $ \st ->
+  State.modify $ \st ->
     st
       { loopLabels =
           case loopLabels st of
@@ -1282,11 +1343,11 @@ popLoopLabels =
 
 pushCaseLabels :: TacM ()
 pushCaseLabels =
-  modify' (\st -> st {caseLabels = CaseContext [] Nothing : caseLabels st})
+  State.modify (\st -> st {caseLabels = CaseContext [] Nothing : caseLabels st})
 
 addCaseLabel :: Place -> Place -> TacM ()
 addCaseLabel value target =
-  modify' $ \st ->
+  State.modify $ \st ->
     st
       { caseLabels =
           case caseLabels st of
@@ -1296,7 +1357,7 @@ addCaseLabel value target =
 
 setDefaultCaseLabel :: Place -> TacM ()
 setDefaultCaseLabel target =
-  modify' $ \st ->
+  State.modify $ \st ->
     st
       { caseLabels =
           case caseLabels st of
@@ -1306,24 +1367,24 @@ setDefaultCaseLabel target =
 
 popCaseLabels :: TacM CaseContext
 popCaseLabels = do
-  labels <- caseLabels <$> get
+  labels <- caseLabels <$> State.get
   case labels of
     context : rest -> do
-      modify' (\st -> st {caseLabels = rest})
+      State.modify (\st -> st {caseLabels = rest})
       pure context {caseEntries = reverse (caseEntries context)}
     [] -> throw "case label stack underflow"
 
-emit :: String -> [(String, Place)] -> TacM ()
+emit :: InstrType -> [(Text, Place)] -> TacM ()
 emit ty fields =
-  modify' (\st -> st {instructions = instructions st |> Instr ty fields []})
+  State.modify (\st -> st {instructions = instructions st |> Instr ty fields []})
 
-emitString :: String -> [(String, String)] -> TacM ()
+emitString :: InstrType -> [(Text, Text)] -> TacM ()
 emitString ty fields =
-  modify' (\st -> st {instructions = instructions st |> Instr ty [] fields})
+  State.modify (\st -> st {instructions = instructions st |> Instr ty [] fields})
 
 insertInstructionsAt :: Int -> [Instr] -> TacM ()
 insertInstructionsAt index inserted =
-  modify' $ \st ->
+  State.modify $ \st ->
     let (prefix, suffix) = Seq.splitAt index (instructions st)
      in st {instructions = prefix >< Seq.fromList inserted >< suffix}
 
@@ -1334,7 +1395,7 @@ renderTac program =
 
 renderMethodOutput :: MethodOutput -> [String]
 renderMethodOutput output =
-  ["METHOD\t" <> methodOutputName output]
+  ["METHOD\t" <> Text.unpack (methodOutputName output)]
     <> zipWith renderInstr [(1 :: Int) ..] (methodOutputInstructions output)
 
 mainLocalSize :: TacProgram -> Integer
@@ -1345,15 +1406,15 @@ mainLocalSize program =
 
 renderInstr :: Int -> Instr -> String
 renderInstr index instr =
-  show index <> "\t" <> instrType instr <> concatMap renderField (instrFields instr) <> concatMap renderStringField (instrStringFields instr)
+  show index <> "\t" <> Text.unpack (instrMnemonic (instrType instr)) <> concatMap renderField (instrFields instr) <> concatMap renderStringField (instrStringFields instr)
 
-renderField :: (String, Place) -> String
-renderField (name, place) = "\t" <> name <> "=" <> renderPlace place
+renderField :: (Text, Place) -> String
+renderField (name, place) = "\t" <> Text.unpack name <> "=" <> Text.unpack (renderPlace place)
 
-renderStringField :: (String, String) -> String
-renderStringField (name, value) = "\t" <> name <> "=" <> value
+renderStringField :: (Text, Text) -> String
+renderStringField (name, value) = "\t" <> Text.unpack name <> "=" <> Text.unpack value
 
-lookupLocal :: String -> TacM Place
+lookupLocal :: Text -> TacM Place
 lookupLocal name = do
   found <- lookupLocalInfo name
   case found of
@@ -1362,19 +1423,160 @@ lookupLocal name = do
         then pure (localInfoPlace info)
         else emitAddressOf (localInfoPlace info)
     Nothing -> do
-      enumConstant <- Map.lookup name . enumConstants <$> get
+      enumConstant <- Map.lookup name . enumConstants <$> State.get
       case enumConstant of
         Just place -> pure place
         Nothing -> do
-          functionPlace <- Map.lookup name . functionPlaces <$> get
+          functionPlace <- Map.lookup name . functionPlaces <$> State.get
           maybe (throw ("missing local: " <> name)) pure functionPlace
 
-lookupLocalInfo :: String -> TacM (Maybe LocalInfo)
+lookupLocalInfo :: Text -> TacM (Maybe LocalInfo)
 lookupLocalInfo name = do
-  local <- Map.lookup name . locals <$> get
+  local <- Map.lookup name . locals <$> State.get
   case local of
     Just info -> pure (Just info)
-    Nothing -> Map.lookup name . globals <$> get
+    Nothing -> Map.lookup name . globals <$> State.get
+
+inferExpressionType :: Node -> TacM CType
+inferExpressionType node =
+  case nodeKind node of
+    NodeExpression -> inferLastChild node
+    NodeAssignment -> fieldNode "lhs" node >>= inferExpressionType
+    NodeTernary -> do
+      trueTy <- fieldNode "true_case" node >>= inferExpressionType
+      falseTy <- fieldNode "false_case" node >>= inferExpressionType
+      pure (fromMaybe trueTy (usualArithmeticConversion trueTy falseTy))
+    NodeLogicalOrExpression -> pure (base "INT")
+    NodeLogicalAndExpression -> pure (base "INT")
+    NodeEqualityExpression -> pure (base "INT")
+    NodeRelationalExpression -> pure (base "INT")
+    NodeInclusiveOrExpression -> inferArithmeticFold node
+    NodeInclusiveXorExpression -> inferArithmeticFold node
+    NodeInclusiveAndExpression -> inferArithmeticFold node
+    NodeShiftExpression -> inferShiftType node
+    NodeSumExpression -> inferArithmeticFold node
+    NodeMultiplicativeExpression -> inferArithmeticFold node
+    NodeCastExpression -> inferCastType node
+    NodeUnaryExpression -> inferUnaryType node
+    NodePostfixExpression -> inferPostfixType node
+    NodePrimaryExpression -> inferLastChild node
+    NodeInt -> pure (baseWithSigned "INT" (not (hasBoolField "is_unsigned" node)))
+    NodeCharacter -> pure (base "CHAR")
+    NodeStringLiteral -> pure (array (stringLiteralLength node) (base "CHAR"))
+    NodeIdentifier -> inferIdentifierType node
+    _ -> pure (base "INT")
+
+inferLastChild :: Node -> TacM CType
+inferLastChild node =
+  case childNodes node of
+    [] -> pure (base "VOID")
+    children -> inferExpressionType (last children)
+
+inferIdentifierType :: Node -> TacM CType
+inferIdentifierType node = do
+  let name = fieldStringDefault "value" (identifierValue node) node
+  found <- lookupLocalInfo name
+  case found of
+    Just info -> pure (decayExpressionType (localInfoType info))
+    Nothing -> do
+      enumConstant <- Map.lookup name . enumConstants <$> State.get
+      if isJust enumConstant
+        then pure (base "INT")
+        else do
+          functionPlace <- Map.lookup name . functionPlaces <$> State.get
+          case functionPlace of
+            Just _ -> pure (pointer (function (base "INT") []))
+            Nothing -> pure (base "INT")
+
+inferArithmeticFold :: Node -> TacM CType
+inferArithmeticFold node =
+  case childNodes node of
+    [] -> pure (base "INT")
+    firstChild : rest -> do
+      firstTy <- inferExpressionType firstChild
+      foldM combine firstTy rest
+  where
+    combine lhs rhsNode = do
+      rhs <- inferExpressionType rhsNode
+      pure (fromMaybe (base "INT") (usualArithmeticConversion lhs rhs))
+
+inferShiftType :: Node -> TacM CType
+inferShiftType node =
+  case childNodes node of
+    firstChild : _ -> do
+      lhs <- inferExpressionType firstChild
+      pure (fromMaybe lhs (integerPromotion lhs))
+    [] -> pure (base "INT")
+
+inferCastType :: Node -> TacM CType
+inferCastType node
+  | hasNodeField "type_specifier" node = do
+      baseTy <- resolveTypeSpecifier =<< fieldNode "type_specifier" node
+      pure (applyPointers (fieldIntDefault "pointer_level" 0 node) baseTy)
+  | otherwise = maybe (pure (base "INT")) inferExpressionType (fieldNodeMaybe "cast_expression" node)
+
+inferUnaryType :: Node -> TacM CType
+inferUnaryType node = do
+  op <- fieldString "operator" node
+  child <- fieldNode "child" node
+  childTy <- inferExpressionType child
+  pure $
+    case op of
+      "SIZEOF" -> base "INT"
+      "&" -> pointer childTy
+      "*" -> dereferenceType childTy
+      "!" -> base "INT"
+      "~" -> fromMaybe (base "INT") (integerPromotion childTy)
+      "+" -> fromMaybe childTy (integerPromotion childTy)
+      "-" -> fromMaybe childTy (integerPromotion childTy)
+      _ -> childTy
+
+inferPostfixType :: Node -> TacM CType
+inferPostfixType node = do
+  primary <- fieldNode "primary_expression" node
+  primaryTy <- inferExpressionType primary
+  foldM inferPostfixOp primaryTy (postfixOps node)
+
+inferPostfixOp :: CType -> PostfixOp -> TacM CType
+inferPostfixOp ty op =
+  case postfixType op of
+    "[" -> pure (decayExpressionType (dereferenceType ty))
+    "(" -> pure (callReturnType ty)
+    "++" -> pure ty
+    "--" -> pure ty
+    "." -> pure (memberAccessType ty op)
+    "->" -> pure (memberAccessType (dereferenceType ty) op)
+    _ -> pure ty
+
+callReturnType :: CType -> CType
+callReturnType ty =
+  case ty of
+    FunctionType ret _ _ -> ret
+    PointerType (FunctionType ret _ _) -> ret
+    _ -> ty
+
+memberAccessType :: CType -> PostfixOp -> CType
+memberAccessType ty op =
+  let memberName' = maybe "" identifierValue (postfixNodeValue op)
+      memberTy =
+        case ty of
+          StructType _ members' -> memberType <$> memberByName memberName' members'
+          UnionType _ members' -> memberType <$> memberByName memberName' members'
+          _ -> Nothing
+   in maybe ty decayExpressionType memberTy
+
+postfixNodeValue :: PostfixOp -> Maybe Node
+postfixNodeValue op =
+  case postfixValue op of
+    Just (NodeRef node) -> Just node
+    _ -> Nothing
+
+decayExpressionType :: CType -> CType
+decayExpressionType ty =
+  case ty of
+    ArrayType _ target -> pointer target
+    FunctionType {} -> pointer ty
+    _ -> ty
 
 isRValue :: Place -> Bool
 isRValue place = placeType place `elem` ["i", "t", "r", "vr"]
@@ -1402,8 +1604,8 @@ emptyPostfixContext = PostfixContext 0 [] False Nothing
 
 primaryPostfixContext :: Node -> TacM PostfixContext
 primaryPostfixContext node =
-  case nodeName node of
-    "IDENTIFIER" -> do
+  case nodeKind node of
+    NodeIdentifier -> do
       info <- lookupLocalInfo (fieldStringDefault "value" (identifierValue node) node)
       pure $
         maybe
@@ -1509,11 +1711,11 @@ resolveTypeSpecifier typeSpecifier = do
       if isBaseSpecifiers specifiers
         then pure (baseFromSpecifiers specifiers)
         else case specifiers of
-          name : _ -> maybe (throw ("missing typedef: " <> name)) pure . Map.lookup name . typeTags =<< get
+          name : _ -> maybe (throw ("missing typedef: " <> name)) pure . Map.lookup name . typeTags =<< State.get
           [] -> throw "empty type specifier"
     Just (NodeRef node)
-      | nodeName node == "STRUCT_OR_UNION_SPECIFIER" -> resolveStructOrUnion node
-      | nodeName node == "ENUM_SPECIFIER" -> resolveEnum node
+      | nodeIs NodeStructOrUnionSpecifier node -> resolveStructOrUnion node
+      | nodeIs NodeEnumSpecifier node -> resolveEnum node
       | otherwise -> throw ("unexpected type specifier node: " <> nodeName node)
     _ -> throw "invalid type specifier kind"
 
@@ -1527,9 +1729,9 @@ resolveStructOrUnion node = do
       let membersWithOffsets = withMemberOffsets isStruct members'
           ty = if isStruct then struct typeName membersWithOffsets else typeName `union` membersWithOffsets
       when (hasNodeField "id" node) $
-        modify' (\st -> st {typeTags = Map.insert typeName ty (typeTags st)})
+        State.modify (\st -> st {typeTags = Map.insert typeName ty (typeTags st)})
       pure ty
-    Nothing -> maybe (throw ("missing type tag: " <> typeName)) pure . Map.lookup typeName . typeTags =<< get
+    Nothing -> maybe (throw ("missing type tag: " <> typeName)) pure . Map.lookup typeName . typeTags =<< State.get
 
 structDeclarationMembers :: Node -> TacM [Member]
 structDeclarationMembers node = do
@@ -1549,8 +1751,8 @@ resolveEnum node = do
       memberNames <- mapM (fmap identifierValue . fieldNode "id") members'
       forM_ (enumMemberValues members') $ \(member, value) -> do
         memberId <- fieldNode "id" member
-        modify' (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (show value)) (enumConstants st)})
-      modify' (\st -> st {typeTags = Map.insert name (enum name memberNames) (typeTags st)})
+        State.modify (\st -> st {enumConstants = Map.insert (identifierValue memberId) (Place "i" (Text.pack (show value))) (enumConstants st)})
+      State.modify (\st -> st {typeTags = Map.insert name (enum name memberNames) (typeTags st)})
     Nothing -> pure ()
   pure (base "INT")
 
@@ -1564,7 +1766,7 @@ buildDirectDeclaratorType direct ty = do
   let withArrays = foldr array ty (fieldIntsDefault "dimensions" [] direct)
   withFunction <-
     case fieldNodeMaybe "parameter_list" direct of
-      Just params -> function withArrays <$> buildParameterListTypes params
+      Just params -> buildFunctionType withArrays params
       Nothing -> pure withArrays
   case fieldNodeMaybe "declarator" direct of
     Just nested -> buildDeclaratorType nested withFunction
@@ -1573,6 +1775,14 @@ buildDirectDeclaratorType direct ty = do
 buildParameterListTypes :: Node -> TacM [CType]
 buildParameterListTypes params =
   mapM buildParameterType (childNodes params)
+
+buildFunctionType :: CType -> Node -> TacM CType
+buildFunctionType ret params = do
+  parameterTys <- buildParameterListTypes params
+  pure $
+    if hasBoolField "is_variadic" params
+      then variadicFunction ret parameterTys
+      else function ret parameterTys
 
 buildParameterType :: Node -> TacM CType
 buildParameterType parameter = do
@@ -1593,21 +1803,6 @@ decayArrayParameter ty =
     ArrayType _ target -> pointer target
     _ -> ty
 
-isBaseSpecifiers :: [String] -> Bool
-isBaseSpecifiers specifiers =
-  case specifiers of
-    ["void"] -> True
-    ["char"] -> True
-    ["short"] -> True
-    ["short", "int"] -> True
-    ["int"] -> True
-    ["long"] -> True
-    ["signed", _] -> True
-    ["unsigned", _] -> True
-    ["signed", _, _] -> True
-    ["unsigned", _, _] -> True
-    _ -> False
-
 declaratorDimensionsWithInitializer :: Maybe Node -> Node -> TacM [Integer]
 declaratorDimensionsWithInitializer initializer declarator = do
   dimensions <- declaratorDimensions declarator
@@ -1623,11 +1818,11 @@ inferredLength :: Maybe Node -> Integer
 inferredLength initializer =
   case initializer of
     Just node
-      | nodeName node == "INITIALIZER_LIST" -> fromIntegral (length (childNodes node))
+      | nodeIs NodeInitializerList node -> fromIntegral (length (childNodes node))
     Just node
-      | nodeName node == "INITIALIZER" ->
+      | nodeIs NodeInitializer node ->
           case fieldNodeMaybe "value" node of
-            Just value | nodeName value == "STRING_LITERAL" -> stringLiteralLength value
+            Just value | nodeIs NodeStringLiteral value -> stringLiteralLength value
             _ -> 1
     _ -> 1
 
@@ -1635,9 +1830,9 @@ initializerContainsDirectString :: Maybe Node -> Bool
 initializerContainsDirectString initializer =
   case initializer of
     Just node
-      | nodeName node == "INITIALIZER" ->
+      | nodeIs NodeInitializer node ->
           case fieldNodeMaybe "value" node of
-            Just value -> nodeName value == "STRING_LITERAL"
+            Just value -> nodeIs NodeStringLiteral value
             _ -> False
     _ -> False
 
@@ -1645,7 +1840,7 @@ directInitializerStringLength :: Maybe Node -> Integer
 directInitializerStringLength initializer =
   case initializer of
     Just node
-      | nodeName node == "INITIALIZER" ->
+      | nodeIs NodeInitializer node ->
           maybe 1 stringLiteralLength (fieldNodeMaybe "value" node)
     _ -> 1
 
@@ -1655,14 +1850,14 @@ allocateNestedInitializerStrings pointerLevel dimensions initializer =
 
 allocateStringsInInitializer :: Integer -> [Integer] -> Node -> TacM ()
 allocateStringsInInitializer pointerLevel dimensions initializer
-  | nodeName initializer == "INITIALIZER" =
+  | nodeIs NodeInitializer initializer =
       case fieldNodeMaybe "value" initializer of
         Just value
-          | nodeName value == "STRING_LITERAL" && pointerLevel > 0 -> do
+          | nodeIs NodeStringLiteral value && pointerLevel > 0 -> do
               _ <- nextGlobalSize (stringLiteralLength value)
               pure ()
         _ -> pure ()
-  | nodeName initializer == "INITIALIZER_LIST" =
+  | nodeIs NodeInitializerList initializer =
       forM_ (childNodes initializer) $ \child ->
         allocateStringsInInitializer (nestedPointerLevel pointerLevel dimensions) (nestedDimensions dimensions) child
   | otherwise = pure ()
@@ -1690,31 +1885,31 @@ declaratorSlotSize dimensions =
 stringLiteralLength :: Node -> Integer
 stringLiteralLength node =
   case lookupField "value" node of
-    Just (StringValue value) -> fromIntegral (length value + 1)
+    Just (StringValue value) -> fromIntegral (Text.length value + 1)
     _ -> 1
 
 firstExpressionChild :: Node -> TacM Node
 firstExpressionChild node =
-  case nodeName node of
-    "EXPRESSION" ->
+  case nodeKind node of
+    NodeExpression ->
       case childNodes node of
         child : _ -> pure child
         [] -> throw "empty expression"
     _ -> pure node
 
-fieldNode :: String -> Node -> TacM Node
+fieldNode :: Text -> Node -> TacM Node
 fieldNode name node =
   case lookupField name node of
     Just (NodeRef child) -> pure child
     _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeList :: String -> Node -> TacM [Node]
+fieldNodeList :: Text -> Node -> TacM [Node]
 fieldNodeList name node =
   case lookupField name node of
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
 
-parameterPlaces :: Node -> TacM [(String, LocalInfo)]
+parameterPlaces :: Node -> TacM [(Text, LocalInfo)]
 parameterPlaces declarator = do
   direct <- fieldNode "direct_declarator" declarator
   case fieldNodeMaybe "parameter_list" direct of
@@ -1728,23 +1923,23 @@ parameterPlaces declarator = do
                   typeSpecifier <- fieldNode "type_specifier" param
                   baseTy <- resolveTypeSpecifier typeSpecifier
                   declaredTy <- decayArrayParameter <$> buildDeclaratorType paramDeclarator baseTy
-                  pure [(declaratorName paramDeclarator, LocalInfo (Place "p" (show index)) (declaratorPointerLevel paramDeclarator) [] (declaratorPointerToArray paramDeclarator) declaredTy)]
+                  pure [(declaratorName paramDeclarator, LocalInfo (Place "p" (Text.pack (show index))) (declaratorPointerLevel paramDeclarator) [] (declaratorPointerToArray paramDeclarator) declaredTy)]
             _ -> pure []
 
-fieldString :: String -> Node -> TacM String
+fieldString :: Text -> Node -> TacM Text
 fieldString name node =
   case lookupField name node of
     Just (StringValue value) -> pure value
     _ -> throw ("missing string field '" <> name <> "' on " <> nodeName node)
 
-characterValue :: Node -> String
+characterValue :: Node -> Text
 characterValue node =
   case lookupField "value" node of
     Just (StringValue value) -> value
-    Just (IntValue value) -> show value
+    Just (IntValue value) -> Text.pack (show value)
     _ -> "0"
 
-declaratorName :: Node -> String
+declaratorName :: Node -> Text
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
@@ -1755,7 +1950,7 @@ functionDeclarationReturnsValue declaration =
     Just (StringList ["VOID"]) -> False
     _ -> True
 
-comparisonGroups :: [NodeChild] -> TacM [(String, Node)]
+comparisonGroups :: [NodeChild] -> TacM [(Text, Node)]
 comparisonGroups [] = pure []
 comparisonGroups (ChildToken token : ChildNode rhs : rest) =
   ((tokenName token, rhs) :) <$> comparisonGroups rest
@@ -1769,33 +1964,37 @@ splitLast (value : values) =
     Just (prefix, finalValue) -> Just (value : prefix, finalValue)
     Nothing -> Nothing
 
-equalityJump :: String -> TacM String
-equalityJump op =
+comparisonJump :: Text -> CType -> CType -> TacM InstrType
+comparisonJump op lhs rhs =
   case op of
-    "==" -> pure "je"
-    "!=" -> pure "jne"
-    _ -> throw ("simple TAC unsupported equality op: " <> op)
+    "==" -> pure IJe
+    "!=" -> pure IJne
+    "<" -> pure (if comparisonUsesUnsigned lhs rhs then IJb else IJl)
+    ">" -> pure (if comparisonUsesUnsigned lhs rhs then IJa else IJg)
+    "<=" -> pure (if comparisonUsesUnsigned lhs rhs then IJbe else IJle)
+    ">=" -> pure (if comparisonUsesUnsigned lhs rhs then IJae else IJge)
+    _ -> throw ("simple TAC unsupported comparison op: " <> op)
 
-signedRelationalJump :: String -> TacM String
-signedRelationalJump op =
-  case op of
-    "<" -> pure "jl"
-    ">" -> pure "jg"
-    "<=" -> pure "jle"
-    ">=" -> pure "jge"
-    _ -> throw ("simple TAC unsupported relational op: " <> op)
+comparisonUsesUnsigned :: CType -> CType -> Bool
+comparisonUsesUnsigned lhs rhs =
+  case (decayExpressionType lhs, decayExpressionType rhs) of
+    (PointerType {}, PointerType {}) -> True
+    (lhs', rhs') ->
+      case usualArithmeticConversion lhs' rhs' of
+        Just (BaseType _ False) -> True
+        _ -> False
 
-compoundOperationType :: String -> TacM String
+compoundOperationType :: Text -> TacM InstrType
 compoundOperationType op =
   case op of
-    "+=" -> pure "add"
-    "-=" -> pure "sub"
-    "*=" -> pure "mull"
-    "&=" -> pure "and"
-    "|=" -> pure "or"
-    "^=" -> pure "xor"
-    "<<=" -> pure "shl"
-    ">>=" -> pure "shr"
+    "+=" -> pure IAdd
+    "-=" -> pure ISub
+    "*=" -> pure IMull
+    "&=" -> pure IAnd
+    "|=" -> pure IOr
+    "^=" -> pure IXor
+    "<<=" -> pure IShl
+    ">>=" -> pure IShr
     "/=" -> throw "simple TAC does not support division assignment"
     "%=" -> throw "simple TAC does not support remainder assignment"
     _ -> throw ("simple TAC does not support assignment op: " <> op)
@@ -1809,14 +2008,14 @@ isLogicalExpression node =
            , "EQUALITY_EXPRESSION"
            ]
 
-defaultPlaces :: [(String, Place)]
+defaultPlaces :: [(Text, Place)]
 defaultPlaces =
   [ (name, operandToPlace operand)
   | (name, symbol) <- defaultSymbols
   , Just operand <- [symbolPlace symbol]
   ]
 
-defaultStandardFunctionTargets :: [(String, Bool)]
+defaultStandardFunctionTargets :: [(Text, Bool)]
 defaultStandardFunctionTargets =
   [ (placeValue (operandToPlace operand), returnsValue (symbolType symbol))
   | (_, symbol) <- defaultSymbols
@@ -1824,13 +2023,13 @@ defaultStandardFunctionTargets =
   , operandIsStandardFunction operand
   ]
 
-defaultStandardFunctionTargetMap :: Map.Map String Bool
+defaultStandardFunctionTargetMap :: Map.Map Text Bool
 defaultStandardFunctionTargetMap = Map.fromList defaultStandardFunctionTargets
 
-methodLabel :: String -> String -> String
+methodLabel :: Text -> Text -> Text
 methodLabel method label = "." <> method <> "_" <> label
 
-placeToConstant :: (String, Place) -> (String, Integer)
+placeToConstant :: (Text, Place) -> (Text, Integer)
 placeToConstant (name, place) = (name, placeInteger place)
 
 operandToPlace :: Operand -> Place
@@ -1840,18 +2039,18 @@ operandToPlace operand =
     , placeValue = operandValueString (operandValue operand)
     }
 
-operandValueString :: OperandValue -> String
+operandValueString :: OperandValue -> Text
 operandValueString value =
   case value of
-    OperandInt number -> show number
+    OperandInt number -> Text.pack (show number)
     OperandName name -> name
 
 returnsValue :: CType -> Bool
 returnsValue ty =
   case ty of
-    FunctionType (BaseType Void _) _ -> False
+    FunctionType (BaseType Void _) _ _ -> False
     FunctionType {} -> True
     _ -> True
 
-throw :: String -> TacM a
-throw = lift . Left
+throw :: Text -> TacM a
+throw = Error.throwError_ . Text.unpack

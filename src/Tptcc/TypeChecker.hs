@@ -4,78 +4,94 @@ module Tptcc.TypeChecker
   ) where
 
 import Control.Monad (foldM, forM, forM_, unless, void, when)
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
-import Data.List (sortOn)
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
+import Data.Monoid (Endo (..), appEndo)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Effectful
+import qualified Effectful.Error.Static as Error
+import Effectful.State.Static.Local (State)
+import qualified Effectful.State.Static.Local as State
+import Effectful.Writer.Static.Local (Writer)
+import qualified Effectful.Writer.Static.Local as Writer
 
 import Tptcc.Ast
 import Tptcc.CType
 import Tptcc.NodeFields
 import Tptcc.Operand (Operand (..))
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
-import Tptcc.Token (SourcePos (..))
+import Tptcc.Token (SourcePos (..), tokenName)
 
 data Namespace = Ordinary | Tag
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data ScopeFrame = ScopeFrame
   { frameLevel :: Int
-  , frameName :: String
-  , frameOrdinary :: Map.Map String Symbol
-  , frameTags :: Map.Map String Symbol
+  , frameName :: Text
+  , frameOrdinary :: Map.Map Text Symbol
+  , frameTags :: Map.Map Text Symbol
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data TypeState = TypeState
-  { scopeStack :: [ScopeFrame]
-  , typeLog :: [String]
+  { scopeStack :: NonEmpty ScopeFrame
   , typedNodes :: Map.Map TypeKey CType
   , blockCounter :: Integer
-  , includedStandardFunctionNames :: [String]
+  , includedStandardFunctionNames :: Set.Set Text
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
-type TypeM = StateT TypeState (Either String)
+type TypeM = Eff TypeEffects
 
-type TypeKey = (String, Int, Int)
+type TypeEffects = '[State TypeState, Writer (Endo [String]), Error.Error String]
+
+data TypeKey = TypeKey NodeKind Int Int
+  deriving stock (Eq, Ord, Show)
 
 typeEvents :: Node -> Either String [String]
 typeEvents ast = do
-  (_, st) <- runStateT (checkProgram ast) initialState
-  pure (typeLog st <> renderTypeAnnotations (typedNodes st) ast)
+  (st, logLines) <- runTypeCheck ast
+  pure (logLines <> renderTypeAnnotations (typedNodes st) ast)
 
 includedStandardFunctions :: Node -> Either String [String]
 includedStandardFunctions ast = do
-  (_, st) <- runStateT (checkProgram ast) initialState
-  pure (includedStandardFunctionNames st)
+  (st, _) <- runTypeCheck ast
+  pure (map Text.unpack (Set.toList (includedStandardFunctionNames st)))
+
+runTypeCheck :: Node -> Either String (TypeState, [String])
+runTypeCheck ast =
+  case runPureEff (Error.runErrorNoCallStack (Writer.runWriter (State.runState initialState (checkProgram ast)))) of
+    Left err -> Left err
+    Right ((_, st), logLines) -> Right (st, appEndo logLines [])
 
 initialState :: TypeState
 initialState =
   TypeState
     { scopeStack =
-        [ ScopeFrame
-            { frameLevel = 0
-            , frameName = "global"
-            , frameOrdinary = Map.fromList defaultSymbols
-            , frameTags = Map.empty
-            }
-        ]
-    , typeLog = []
+        ScopeFrame
+          { frameLevel = 0
+          , frameName = "global"
+          , frameOrdinary = Map.fromList defaultSymbols
+          , frameTags = Map.empty
+          }
+          :| []
     , typedNodes = Map.empty
     , blockCounter = 0
-    , includedStandardFunctionNames = []
+    , includedStandardFunctionNames = Set.empty
     }
 
 checkProgram :: Node -> TypeM ()
 checkProgram program = do
-  requireName "PROGRAM" program
+  requireKind NodeProgram program
   mapM_ buildDeclaration (childNodes program)
 
 buildDeclaration :: Node -> TypeM ()
 buildDeclaration declaration = do
-  requireName "DECLARATION" declaration
+  requireKind NodeDeclaration declaration
   specifier <- fieldNode "specifier" declaration
   typeSpecifier <- fieldNode "type_specifier" specifier
   baseType <- resolveTypeSpecifier typeSpecifier
@@ -95,7 +111,7 @@ buildDeclaration declaration = do
             , symbolIsTypeName = False
             , symbolIsPrototype = isExternDeclaration || (hasBoolField "is_function" declaration && not isFunctionDefinition)
             }
-    existing <- lookupSymbol Ordinary name
+    existing <- lookupCurrentSymbol Ordinary name
     case existing of
       Just existingSymbol
         | symbolIsPrototype existingSymbol -> setCurrentSymbol Ordinary name symbol
@@ -115,7 +131,7 @@ buildDeclaration declaration = do
             , symbolIsPrototype = False
             }
       case declaredType of
-        FunctionType _ _ -> pure ()
+        FunctionType {} -> pure ()
         _ -> pure ()
       block <- fieldNode "block" declaration
       checkBlock block
@@ -123,7 +139,7 @@ buildDeclaration declaration = do
 
 resolveTypeSpecifier :: Node -> TypeM CType
 resolveTypeSpecifier typeSpecifier = do
-  requireName "TYPE_SPECIFIER" typeSpecifier
+  requireKind NodeTypeSpecifier typeSpecifier
   kind <- field "kind" typeSpecifier
   case kind of
     StringList specifiers ->
@@ -135,8 +151,8 @@ resolveTypeSpecifier typeSpecifier = do
             pure (symbolType symbol)
           [] -> throw "empty type specifier"
     NodeRef node
-      | nodeName node == "STRUCT_OR_UNION_SPECIFIER" -> checkStructOrUnion node
-      | nodeName node == "ENUM_SPECIFIER" -> checkEnum node
+      | nodeIs NodeStructOrUnionSpecifier node -> checkStructOrUnion node
+      | nodeIs NodeEnumSpecifier node -> checkEnum node
       | otherwise -> throw ("unexpected type specifier node: " <> nodeName node)
     _ -> throw "invalid type specifier kind"
 
@@ -183,7 +199,7 @@ checkEnum node = do
 
 buildDeclarator :: Node -> CType -> TypeM CType
 buildDeclarator declarator baseType' = do
-  requireName "DECLARATOR" declarator
+  requireKind NodeDeclarator declarator
   pointerLevel <- fieldInt "pointer_level" declarator
   direct <- fieldNode "direct_declarator" declarator
   ty <- buildDirectDeclarator direct (applyPointers pointerLevel baseType')
@@ -195,7 +211,7 @@ buildDirectDeclarator direct ty = do
   let withArrays = foldr array ty dimensions
   withFunction <-
     case fieldNodeMaybe "parameter_list" direct of
-      Just params -> function withArrays <$> buildParameterList params
+      Just params -> buildFunctionType withArrays params
       Nothing -> pure withArrays
   case fieldNodeMaybe "declarator" direct of
     Just nested -> buildDeclarator nested withFunction
@@ -203,14 +219,22 @@ buildDirectDeclarator direct ty = do
 
 buildParameterList :: Node -> TypeM [CType]
 buildParameterList params = do
-  requireName "PARAMETER_LIST" params
+  requireKind NodeParameterList params
   mapM (fmap parameterType . buildParameter) (childNodes params)
 
+buildFunctionType :: CType -> Node -> TypeM CType
+buildFunctionType ret params = do
+  parameterTys <- buildParameterList params
+  pure $
+    if hasBoolField "is_variadic" params
+      then variadicFunction ret parameterTys
+      else function ret parameterTys
+
 data Parameter = Parameter
-  { parameterName :: Maybe String
+  { parameterName :: Maybe Text
   , parameterType :: CType
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 buildParameter :: Node -> TypeM Parameter
 buildParameter parameter = do
@@ -225,7 +249,7 @@ buildParameter parameter = do
       _ <- recordType parameter baseType'
       pure Parameter {parameterName = Nothing, parameterType = baseType'}
 
-functionParameters :: Node -> TypeM [(String, CType)]
+functionParameters :: Node -> TypeM [(Text, CType)]
 functionParameters declarator = do
   direct <- fieldNode "direct_declarator" declarator
   params <- maybe (pure []) (mapM buildParameter . childNodes) (fieldNodeMaybe "parameter_list" direct)
@@ -239,66 +263,66 @@ adjustInitializerType declarator ty =
 
 adjustFromInitializer :: Node -> CType -> CType
 adjustFromInitializer initializer ty
-  | nodeName initializer == "INITIALIZER_LIST" =
+  | nodeIs NodeInitializerList initializer =
       case ty of
         ArrayType (-1) target -> ArrayType (fromIntegral (length (childNodes initializer))) target
         _ -> ty
-  | nodeName initializer == "INITIALIZER" =
+  | nodeIs NodeInitializer initializer =
       case (fieldNodeMaybe "value" initializer, ty) of
         (Just valueNode, ArrayType (-1) target)
-          | nodeName valueNode == "STRING_LITERAL" ->
-              ArrayType (fromIntegral (length (fieldStringDefault "value" "" valueNode)) + 1) target
+          | nodeIs NodeStringLiteral valueNode ->
+              ArrayType (fromIntegral (Text.length (fieldStringDefault "value" "" valueNode)) + 1) target
         _ -> ty
   | otherwise = ty
 
 checkBlock :: Node -> TypeM ()
 checkBlock block = do
   blockId <- nextBlockId
-  enterScope ("block_" <> show blockId)
+  enterScope ("block_" <> tshow blockId)
   mapM_ checkStatement (childNodes block)
   exitScope
 
 checkStatement :: Node -> TypeM ()
 checkStatement statement = do
   child <- fieldNode "child" statement
-  case nodeName child of
-    "DECLARATION" -> buildDeclaration child
-    "IF" -> do
+  case nodeKind child of
+    NodeDeclaration -> buildDeclaration child
+    NodeIf -> do
       _ <- checkExpression =<< fieldNode "condition" child
       checkStatement =<< fieldNode "true_case" child
       maybe (pure ()) checkStatement (fieldNodeMaybe "false_case" child)
-    "BLOCK" -> checkBlock child
-    "FOR" -> checkFor child
-    "WHILE" -> do
+    NodeBlock -> checkBlock child
+    NodeFor -> checkFor child
+    NodeWhile -> do
       _ <- checkExpression =<< fieldNode "condition" child
       checkStatement =<< fieldNode "statement" child
-    "DO_WHILE" -> do
+    NodeDoWhile -> do
       checkStatement =<< fieldNode "statement" child
       _ <- checkExpression =<< fieldNode "condition" child
       pure ()
-    "SWITCH" -> do
+    NodeSwitch -> do
       _ <- checkExpression =<< fieldNode "condition" child
       checkBlock =<< fieldNode "block" child
-    "CASE" -> do
+    NodeCase -> do
       _ <- checkPrimaryExpression =<< fieldNode "value" child
       checkStatement =<< fieldNode "statement" child
-    "DEFAULT" -> checkStatement =<< fieldNode "statement" child
-    "GOTO" -> do
+    NodeDefault -> checkStatement =<< fieldNode "statement" child
+    NodeGoto -> do
       _ <- fieldNode "target" child
       pure ()
-    "LABEL" -> checkStatement =<< fieldNode "statement" child
-    "RETURN" -> maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "value" child)
-    "EXPRESSION" -> void (checkExpression child)
-    "ASM" -> checkAsm child
+    NodeLabel -> checkStatement =<< fieldNode "statement" child
+    NodeReturn -> maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "value" child)
+    NodeExpression -> void (checkExpression child)
+    NodeAsm -> checkAsm child
     _ -> pure ()
 
 checkFor :: Node -> TypeM ()
 checkFor node = do
   blockId <- nextBlockId
-  enterScope ("for_loop_" <> show blockId)
+  enterScope ("for_loop_" <> tshow blockId)
   case fieldNodeMaybe "initialization" node of
     Just initialization
-      | nodeName initialization == "DECLARATION" -> buildDeclaration initialization
+      | nodeIs NodeDeclaration initialization -> buildDeclaration initialization
       | otherwise -> void (checkExpression initialization)
     Nothing -> pure ()
   maybe (pure ()) (void . checkExpression) (fieldNodeMaybe "condition" node)
@@ -326,12 +350,12 @@ checkTopInitializerFor = checkInitializerFor True
 
 checkInitializerFor :: Bool -> CType -> Node -> TypeM CType
 checkInitializerFor recordList target initializer
-  | nodeName initializer == "INITIALIZER_LIST" = do
+  | nodeIs NodeInitializerList initializer = do
       let children = childNodes initializer
       childTypes <- mapM (checkInitializerFor False (initializerElementType target)) children
       let ty = initializerListType target childTypes
       if recordList then recordType initializer ty else pure ty
-  | nodeName initializer == "INITIALIZER" = do
+  | nodeIs NodeInitializer initializer = do
       value <- fieldNode "value" initializer
       ty <- checkAssignmentExpression value
       recordType initializer ty
@@ -355,7 +379,7 @@ initializerListType target childTypes =
 
 checkExpression :: Node -> TypeM CType
 checkExpression node
-  | nodeName node == "EXPRESSION" = do
+  | nodeIs NodeExpression node = do
       let children = childNodes node
       childTypes <- mapM checkAssignmentExpression children
       ty <- maybe (pure (base "VOID")) pure (lastMaybe childTypes)
@@ -364,15 +388,24 @@ checkExpression node
 
 checkAssignmentExpression :: Node -> TypeM CType
 checkAssignmentExpression node
-  | nodeName node == "ASSIGNMENT" = do
-      lhs <- fieldNode "lhs" node >>= checkTernaryExpression
-      _ <- fieldNode "rhs" node >>= checkAssignmentExpression
+  | nodeIs NodeAssignment node = do
+      lhsNode <- fieldNode "lhs" node
+      assignable <- isAssignableExpression lhsNode
+      unless assignable $
+        throw "Left-hand side of assignment is not assignable"
+      lhs <- checkTernaryExpression lhsNode
+      unless (isAssignableType lhs) $
+        throw ("Cannot assign to " <> renderTypePretty lhs)
+      rhsNode <- fieldNode "rhs" node
+      rhs <- checkAssignmentExpression rhsNode
+      unless (canAssignFrom rhsNode rhs lhs) $
+        throw ("Cannot assign " <> renderTypePretty rhs <> " to " <> renderTypePretty lhs)
       recordType node lhs
   | otherwise = checkTernaryExpression node
 
 checkTernaryExpression :: Node -> TypeM CType
 checkTernaryExpression node
-  | nodeName node == "TERNARY" = do
+  | nodeIs NodeTernary node = do
       _ <- fieldNode "condition" node >>= checkLogicalOrExpression
       trueTy <- fieldNode "true_case" node >>= checkAssignmentExpression
       falseTy <- fieldNode "false_case" node >>= checkLogicalOrExpression
@@ -382,65 +415,165 @@ checkTernaryExpression node
   | otherwise = checkLogicalOrExpression node
 
 checkLogicalOrExpression :: Node -> TypeM CType
-checkLogicalOrExpression = checkOperandOnlyIntNode "LOGICAL_OR_EXPRESSION" checkLogicalAndExpression
+checkLogicalOrExpression = checkLogicalNode NodeLogicalOrExpression checkLogicalAndExpression
 
 checkLogicalAndExpression :: Node -> TypeM CType
-checkLogicalAndExpression = checkOperandOnlyIntNode "LOGICAL_AND_EXPRESSION" checkInclusiveOrExpression
+checkLogicalAndExpression = checkLogicalNode NodeLogicalAndExpression checkInclusiveOrExpression
 
 checkInclusiveOrExpression :: Node -> TypeM CType
-checkInclusiveOrExpression = checkOperandOnlyIntNode "INCLUSIVE_OR_EXPRESSION" checkInclusiveXorExpression
+checkInclusiveOrExpression = checkIntegerFoldNode NodeInclusiveOrExpression checkInclusiveXorExpression
 
 checkInclusiveXorExpression :: Node -> TypeM CType
-checkInclusiveXorExpression = checkOperandOnlyIntNode "INCLUSIVE_XOR_EXPRESSION" checkInclusiveAndExpression
+checkInclusiveXorExpression = checkIntegerFoldNode NodeInclusiveXorExpression checkInclusiveAndExpression
 
 checkInclusiveAndExpression :: Node -> TypeM CType
-checkInclusiveAndExpression = checkOperandOnlyIntNode "INCLUSIVE_AND_EXPRESSION" checkEqualityExpression
+checkInclusiveAndExpression = checkIntegerFoldNode NodeInclusiveAndExpression checkEqualityExpression
 
 checkEqualityExpression :: Node -> TypeM CType
-checkEqualityExpression = checkBinaryIntNode "EQUALITY_EXPRESSION" checkRelationalExpression
+checkEqualityExpression = checkComparisonNode NodeEqualityExpression checkRelationalExpression
 
 checkRelationalExpression :: Node -> TypeM CType
 checkRelationalExpression node
-  | nodeName node == "RELATIONAL_EXPRESSION" = do
-      mapM_ checkShiftExpression (childNodes node)
+  | nodeIs NodeRelationalExpression node = do
+      _ <- foldComparisonExpression node checkShiftExpression
       recordType node (baseWithSigned "INT" True)
   | otherwise = checkShiftExpression node
 
 checkShiftExpression :: Node -> TypeM CType
-checkShiftExpression = checkBinaryIntNode "SHIFT_EXPRESSION" checkSumExpression
+checkShiftExpression node
+  | nodeIs NodeShiftExpression node = do
+      ty <- foldTokenExpression node checkSumExpression shiftResultType
+      recordType node ty
+  | otherwise = checkSumExpression node
 
-checkOperandOnlyIntNode :: String -> (Node -> TypeM CType) -> Node -> TypeM CType
-checkOperandOnlyIntNode expected subChecker node
-  | nodeName node == expected = do
+checkLogicalNode :: NodeKind -> (Node -> TypeM CType) -> Node -> TypeM CType
+checkLogicalNode expected subChecker node
+  | nodeIs expected node = do
       childTypes <- mapM subChecker (childNodes node)
-      recordType node (intFromSignedness childTypes)
+      mapM_ requireScalar childTypes
+      recordType node (base "INT")
   | otherwise = subChecker node
 
-checkBinaryIntNode :: String -> (Node -> TypeM CType) -> Node -> TypeM CType
-checkBinaryIntNode expected subChecker node
-  | nodeName node == expected = do
+checkIntegerFoldNode :: NodeKind -> (Node -> TypeM CType) -> Node -> TypeM CType
+checkIntegerFoldNode expected subChecker node
+  | nodeIs expected node = do
       childTypes <- mapM subChecker (childNodes node)
-      recordType node (intFromSignedness childTypes)
+      ty <- foldM integerArithmeticResultType (base "INT") childTypes
+      recordType node ty
   | otherwise = subChecker node
+
+checkComparisonNode :: NodeKind -> (Node -> TypeM CType) -> Node -> TypeM CType
+checkComparisonNode expected subChecker node
+  | nodeIs expected node = do
+      _ <- foldComparisonExpression node subChecker
+      recordType node (base "INT")
+  | otherwise = subChecker node
+
+foldComparisonExpression :: Node -> (Node -> TypeM CType) -> TypeM CType
+foldComparisonExpression node subChecker =
+  case nodeChildren node of
+    ChildNode firstNode : rest -> do
+      firstTy <- subChecker firstNode
+      foldComparisonRest firstNode (decayExpressionType firstTy) rest
+    _ -> throw ("malformed " <> nodeName node)
+  where
+    foldComparisonRest _ acc [] = pure acc
+    foldComparisonRest lhsNode lhsTy (ChildToken token : ChildNode rhsNode : rest) = do
+      rhsTy <- decayExpressionType <$> subChecker rhsNode
+      result <- comparisonResultType (tokenName token) lhsNode lhsTy rhsNode rhsTy
+      foldComparisonRest rhsNode result rest
+    foldComparisonRest _ _ _ = throw ("malformed " <> nodeName node)
+
+foldTokenExpression :: Node -> (Node -> TypeM CType) -> (Text -> CType -> CType -> TypeM CType) -> TypeM CType
+foldTokenExpression node subChecker combine =
+  case nodeChildren node of
+    ChildNode firstNode : rest -> do
+      firstTy <- subChecker firstNode
+      foldTokenRest (decayExpressionType firstTy) rest
+    _ -> throw ("malformed " <> nodeName node)
+  where
+    foldTokenRest acc [] = pure acc
+    foldTokenRest acc (ChildToken token : ChildNode rhsNode : rest) = do
+      rhs <- decayExpressionType <$> subChecker rhsNode
+      result <- combine (tokenName token) acc rhs
+      foldTokenRest result rest
+    foldTokenRest _ _ = throw ("malformed " <> nodeName node)
 
 checkSumExpression :: Node -> TypeM CType
 checkSumExpression node
-  | nodeName node == "SUM_EXPRESSION" = do
-      childTypes <- mapM checkTerm (childNodes node)
-      let ty = fromMaybe (intFromSignedness childTypes) (firstPointer childTypes)
+  | nodeIs NodeSumExpression node = do
+      ty <-
+        case nodeChildren node of
+          ChildNode firstNode : rest -> do
+            firstTy <- checkTerm firstNode
+            foldSumExpression (decayExpressionType firstTy) rest
+          _ -> throw "malformed sum expression"
       recordType node ty
   | otherwise = checkTerm node
 
+foldSumExpression :: CType -> [NodeChild] -> TypeM CType
+foldSumExpression acc [] = pure acc
+foldSumExpression acc (ChildToken token : ChildNode rhsNode : rest) = do
+  rhs <- decayExpressionType <$> checkTerm rhsNode
+  result <- sumResultType (tokenName token) acc rhs
+  foldSumExpression result rest
+foldSumExpression _ _ = throw "malformed sum expression"
+
+sumResultType :: Text -> CType -> CType -> TypeM CType
+sumResultType op lhs rhs
+  | isIntegerType lhs && isIntegerType rhs = integerArithmeticResultType lhs rhs
+  | op == "+" && isPointerType lhs && isIntegerType rhs = pure lhs
+  | op == "+" && isIntegerType lhs && isPointerType rhs = pure rhs
+  | op == "-" && isPointerType lhs && isIntegerType rhs = pure lhs
+  | op == "-" && isPointerType lhs && isPointerType rhs && compatiblePointerTypes lhs rhs = pure (base "INT")
+  | op == "-" && isPointerType lhs && isPointerType rhs = throw "Cannot subtract incompatible pointer types"
+  | isPointerType lhs || isPointerType rhs = throw ("Invalid pointer arithmetic using " <> op)
+  | otherwise = pure (base "INT")
+
+integerTokenResultType :: Text -> CType -> CType -> TypeM CType
+integerTokenResultType _ = integerArithmeticResultType
+
+integerArithmeticResultType :: CType -> CType -> TypeM CType
+integerArithmeticResultType lhs rhs =
+  case usualArithmeticConversion lhs rhs of
+    Just ty -> pure ty
+    Nothing -> throw ("Integer arithmetic requires integer operands, got " <> renderTypePretty lhs <> " and " <> renderTypePretty rhs)
+
+shiftResultType :: Text -> CType -> CType -> TypeM CType
+shiftResultType _ lhs rhs = do
+  lhsPromoted <- requireIntegerPromotion lhs
+  _ <- requireIntegerPromotion rhs
+  pure lhsPromoted
+
+comparisonResultType :: Text -> Node -> CType -> Node -> CType -> TypeM CType
+comparisonResultType op lhsNode lhs rhsNode rhs
+  | isIntegerType lhs && isIntegerType rhs = base "INT" <$ integerArithmeticResultType lhs rhs
+  | isPointerType lhs && isPointerType rhs && compatiblePointerTypes lhs rhs = pure (base "INT")
+  | op `elem` ["==", "!="] && isPointerType lhs && isNullPointerConstant rhsNode = pure (base "INT")
+  | op `elem` ["==", "!="] && isNullPointerConstant lhsNode && isPointerType rhs = pure (base "INT")
+  | otherwise = throw ("Cannot compare " <> renderTypePretty lhs <> " with " <> renderTypePretty rhs)
+
+requireIntegerPromotion :: CType -> TypeM CType
+requireIntegerPromotion ty =
+  case integerPromotion ty of
+    Just promoted -> pure promoted
+    Nothing -> throw ("Expected integer type, got " <> renderTypePretty ty)
+
+requireScalar :: CType -> TypeM ()
+requireScalar ty =
+  unless (isScalarType ty) $
+    throw ("Expected scalar type, got " <> renderTypePretty ty)
+
 checkTerm :: Node -> TypeM CType
 checkTerm node
-  | nodeName node == "MULTIPLICATIVE_EXPRESSION" = do
-      childTypes <- mapM checkCastExpression (childNodes node)
-      recordType node (fromMaybe (base "INT") (firstMaybe childTypes))
+  | nodeIs NodeMultiplicativeExpression node = do
+      ty <- foldTokenExpression node checkCastExpression integerTokenResultType
+      recordType node ty
   | otherwise = checkCastExpression node
 
 checkCastExpression :: Node -> TypeM CType
 checkCastExpression node
-  | nodeName node == "CAST_EXPRESSION" = do
+  | nodeIs NodeCastExpression node = do
       typeName <- fieldNode "type_specifier" node
       baseTy <- checkTypeName typeName
       pointerLevel <- fieldInt "pointer_level" node
@@ -450,11 +583,11 @@ checkCastExpression node
 
 checkUnaryExpression :: Node -> TypeM CType
 checkUnaryExpression node
-  | nodeName node == "UNARY_EXPRESSION" = do
+  | nodeIs NodeUnaryExpression node = do
       op <- fieldString "operator" node
       child <- fieldNode "child" node
       childTy <-
-        if nodeName child == "TYPE_NAME"
+        if nodeIs NodeTypeName child
           then checkTypeName child
           else checkUnaryExpression child
       let result =
@@ -493,7 +626,7 @@ buildDirectAbstractDeclarator :: Node -> CType -> TypeM CType
 buildDirectAbstractDeclarator node baseTy = do
   withFunction <-
     case fieldNodeMaybe "parameter_list" node of
-      Just params -> function baseTy <$> buildParameterList params
+      Just params -> buildFunctionType baseTy params
       Nothing -> pure baseTy
   let dimensions = map (fieldIntDefault "value" 0) (childNodes node)
       withArrays = foldr array withFunction dimensions
@@ -503,7 +636,7 @@ buildDirectAbstractDeclarator node baseTy = do
 
 checkPostfixExpression :: Node -> TypeM CType
 checkPostfixExpression node
-  | nodeName node == "POSTFIX_EXPRESSION" = do
+  | nodeIs NodePostfixExpression node = do
       primaryTy <- fieldNode "primary_expression" node >>= checkPrimaryExpression
       finalTy <- foldPostfixOps primaryTy (postfixOps node)
       recordType node finalTy
@@ -521,8 +654,8 @@ foldPostfixOps =
               PointerType target -> target
               _ -> ty
         case callable of
-          FunctionType ret params -> do
-            maybe (pure ()) (`checkArgumentList` params) (postfixNodeValue op)
+          FunctionType ret params isVariadic -> do
+            maybe (checkArgumentList emptyArgumentList params isVariadic) (\arguments -> checkArgumentList arguments params isVariadic) (postfixNodeValue op)
             pure ret
           _ -> pure ty
       "++" -> pure ty
@@ -531,20 +664,27 @@ foldPostfixOps =
       "->" -> pure (memberAccessType (dereferenceType ty) op)
       _ -> pure ty
 
-checkArgumentList :: Node -> [CType] -> TypeM ()
-checkArgumentList arguments params = do
-  argumentTypes <- mapM checkAssignmentExpression (childNodes arguments)
-  unless (length argumentTypes == length params) $
-    throw "Argument list length does not match the parameter list length"
-  forM_ (zip argumentTypes params) $ \(argTy, paramTy) ->
-    unless (canCoerce argTy paramTy) $
-      throw "Argument type does not match parameter type"
+checkArgumentList :: Node -> [CType] -> Bool -> TypeM ()
+checkArgumentList arguments params isVariadic = do
+  let argumentNodes = childNodes arguments
+  argumentTypes <- mapM checkAssignmentExpression argumentNodes
+  if isVariadic
+    then
+      unless (length argumentTypes >= length params) $
+        throw "Variadic argument list has fewer arguments than the fixed parameter list"
+    else
+      unless (length argumentTypes == length params) $
+        throw "Argument list length does not match the parameter list length"
+  forM_ (zip argumentNodes (zip argumentTypes params)) $ \(argNode, (argTy, paramTy)) ->
+    unless (canAssignFrom argNode argTy paramTy) $
+      throw ("Argument type " <> renderTypePretty argTy <> " does not match parameter type " <> renderTypePretty paramTy)
+  mapM_ (requireScalar . defaultArgumentPromotion) (drop (length params) argumentTypes)
 
 checkPrimaryExpression :: Node -> TypeM CType
 checkPrimaryExpression node =
-  case nodeName node of
-    "INT" -> recordType node (baseWithSigned "INT" (not (hasBoolField "is_unsigned" node)))
-    "IDENTIFIER" -> do
+  case nodeKind node of
+    NodeInt -> recordType node (baseWithSigned "INT" (not (hasBoolField "is_unsigned" node)))
+    NodeIdentifier -> do
       let name = fieldStringDefault "value" (identifierValue node) node
       symbol <- requireSymbol Ordinary name
       let ty = symbolType symbol
@@ -555,63 +695,118 @@ checkPrimaryExpression node =
               _ -> ty
       case (ty, symbolPlace symbol) of
         (FunctionType {}, Just place) | operandIsStandardFunction place ->
-          modify' (\st -> st {includedStandardFunctionNames = includedStandardFunctionNames st <> [name]})
+          State.modify (\st -> st {includedStandardFunctionNames = Set.insert name (includedStandardFunctionNames st)})
         _ -> pure ()
       recordType node decayed
-    "STRING_LITERAL" -> recordType node (array (fromIntegral (length (fieldStringDefault "value" "" node)) + 1) (base "CHAR"))
-    "CHARACTER" -> recordType node (base "CHAR")
-    "EXPRESSION" -> checkExpression node
+    NodeStringLiteral -> recordType node (array (fromIntegral (Text.length (fieldStringDefault "value" "" node)) + 1) (base "CHAR"))
+    NodeCharacter -> recordType node (base "CHAR")
+    NodeExpression -> checkExpression node
     _ -> throw ("Invalid primary expression: " <> nodeName node)
 
+canAssignFrom :: Node -> CType -> CType -> Bool
+canAssignFrom sourceNode source target =
+  canCoerce source target || (isPointerType target && isNullPointerConstant sourceNode)
+
 canCoerce :: CType -> CType -> Bool
-canCoerce ty target =
-  case (ty, target) of
-    (PointerType (BaseType Void _), PointerType {}) -> True
-    (PointerType {}, PointerType (BaseType Void _)) -> True
-    (PointerType a, PointerType b) -> canCoerce a b
-    (ArrayType _ a, PointerType b) -> canCoerce a b
-    (BaseType Int _, PointerType {}) -> True
+canCoerce source target =
+  case (decayExpressionType source, target) of
+    (PointerType a, PointerType b) -> compatiblePointerTargets a b
     (ArrayType la a, ArrayType lb b) -> (la <= lb || lb < 0) && canCoerce a b
-    (FunctionType retA paramsA, FunctionType retB paramsB) ->
-      canCoerce retA retB
+    (FunctionType retA paramsA variadicA, FunctionType retB paramsB variadicB) ->
+      variadicA == variadicB
+        && canCoerce retA retB
         && length paramsA == length paramsB
         && and (zipWith canCoerce paramsA paramsB)
-    (BaseType {}, BaseType {}) -> True
+    _ | isIntegerType source && isIntegerType target -> True
     (StructType ida _, StructType idb _) -> ida == idb
     (UnionType ida _, UnionType idb _) -> ida == idb
     _ -> False
 
+emptyArgumentList :: Node
+emptyArgumentList =
+  Node
+    { nodeKind = NodeArgumentExpressionList
+    , nodeTypeId = nodeTypeIdFor "ARGUMENT_EXPRESSION_LIST"
+    , nodePos = SourcePos 0 0
+    , nodeChildren = []
+    , nodeFields = []
+    }
+
+decayExpressionType :: CType -> CType
+decayExpressionType ty =
+  case ty of
+    ArrayType _ target -> pointer target
+    FunctionType {} -> pointer ty
+    _ -> ty
+
+isScalarType :: CType -> Bool
+isScalarType ty = isIntegerType ty || isPointerType ty
+
+isPointerType :: CType -> Bool
+isPointerType PointerType {} = True
+isPointerType _ = False
+
+compatiblePointerTypes :: CType -> CType -> Bool
+compatiblePointerTypes (PointerType lhs) (PointerType rhs) = compatiblePointerTargets lhs rhs
+compatiblePointerTypes _ _ = False
+
+compatiblePointerTargets :: CType -> CType -> Bool
+compatiblePointerTargets (BaseType Void _) _ = True
+compatiblePointerTargets _ (BaseType Void _) = True
+compatiblePointerTargets lhs rhs = sameTypeChain lhs rhs True
+
+isNullPointerConstant :: Node -> Bool
+isNullPointerConstant node =
+  case nodeKind node of
+    NodeInt -> fieldIntDefault "value" 1 node == 0
+    NodeExpression -> case childNodes node of
+      [child] -> isNullPointerConstant child
+      _ -> False
+    NodeCastExpression -> maybe False isNullPointerConstant (fieldNodeMaybe "cast_expression" node)
+    _ -> False
+
+isAssignableExpression :: Node -> TypeM Bool
+isAssignableExpression node =
+  case nodeKind node of
+    NodeIdentifier -> do
+      let name = fieldStringDefault "value" (identifierValue node) node
+      symbol <- requireSymbol Ordinary name
+      pure (isAssignableType (symbolType symbol))
+    NodeUnaryExpression -> pure (fieldStringDefault "operator" "" node == "*")
+    NodePostfixExpression -> pure (any postfixAssigns (postfixOps node))
+    NodeExpression -> case childNodes node of
+      [child] -> isAssignableExpression child
+      _ -> pure False
+    _ -> pure False
+
+postfixAssigns :: PostfixOp -> Bool
+postfixAssigns op = postfixType op `elem` ["[", ".", "->"]
+
+isAssignableType :: CType -> Bool
+isAssignableType ArrayType {} = False
+isAssignableType FunctionType {} = False
+isAssignableType _ = True
+
 recordType :: Node -> CType -> TypeM CType
 recordType node ty = do
   let key = typeKey node
-  modify' (\st -> st {typedNodes = Map.insert key ty (typedNodes st)})
+  State.modify (\st -> st {typedNodes = Map.insert key ty (typedNodes st)})
   pure ty
 
 typeKey :: Node -> TypeKey
-typeKey node = (nodeName node, row (nodePos node), col (nodePos node))
+typeKey node = TypeKey (nodeKind node) (row (nodePos node)) (col (nodePos node))
 
 renderTypeAnnotations :: Map.Map TypeKey CType -> Node -> [String]
-renderTypeAnnotations annotations = go
+renderTypeAnnotations annotations =
+  foldMapNode typeLine
   where
-    go node =
+    typeLine node =
       maybe [] (\ty -> [renderTypeLine node ty]) (Map.lookup (typeKey node) annotations)
-        <> concatMap goChild (nodeChildren node)
-        <> concatMap goField (sortOn fieldName (nodeFields node))
-    goChild child =
-      case child of
-        ChildNode node -> go node
-        ChildPostfix op -> maybe [] go (postfixNodeValue op)
-        ChildToken _ -> []
-    goField field' =
-      case fieldValue field' of
-        NodeRef node -> go node
-        NodeList nodes -> concatMap go nodes
-        _ -> []
 
 renderTypeLine :: Node -> CType -> String
 renderTypeLine node ty =
   let pos = nodePos node
-   in "TYPE\t" <> show (row pos) <> "\t" <> show (col pos) <> "\t" <> nodeName node <> "\t" <> renderTypePretty ty
+   in Text.unpack ("TYPE\t" <> Text.pack (show (row pos)) <> "\t" <> Text.pack (show (col pos)) <> "\t" <> nodeName node <> "\t" <> renderTypePretty ty)
 
 postfixOps :: Node -> [PostfixOp]
 postfixOps node = [op | ChildPostfix op <- nodeChildren node]
@@ -642,18 +837,7 @@ dereferenceType ty =
     ArrayType _ target -> target
     _ -> ty
 
-intFromSignedness :: [CType] -> CType
-intFromSignedness types = baseWithSigned "INT" (any isSignedType types)
-
-isSignedType :: CType -> Bool
-isSignedType (BaseType _ signed) = signed
-isSignedType _ = False
-
-firstPointer :: [CType] -> Maybe CType
-firstPointer types =
-  firstJust [Just ty | ty@PointerType {} <- types]
-
-fieldString :: String -> Node -> TypeM String
+fieldString :: Text -> Node -> TypeM Text
 fieldString name node =
   case lookupField name node of
     Just (StringValue value) -> pure value
@@ -670,9 +854,9 @@ lastMaybe (_ : values) = lastMaybe values
 
 nextBlockId :: TypeM Integer
 nextBlockId = do
-  st <- get
+  st <- State.get
   let current = blockCounter st
-  modify' (\s -> s {blockCounter = current + 1})
+  State.modify (\s -> s {blockCounter = current + 1})
   pure current
 
 decayArrayParameter :: CType -> CType
@@ -686,55 +870,38 @@ applyPointers count ty
   | count <= 0 = ty
   | otherwise = applyPointers (count - 1) (pointer ty)
 
-isBaseSpecifiers :: [String] -> Bool
-isBaseSpecifiers specifiers =
-  case specifiers of
-    ["void"] -> True
-    ["char"] -> True
-    ["short"] -> True
-    ["short", "int"] -> True
-    ["int"] -> True
-    ["long"] -> True
-    ["signed", _] -> True
-    ["unsigned", _] -> True
-    ["signed", _, _] -> True
-    ["unsigned", _, _] -> True
-    ["SIGNED", _] -> True
-    ["UNSIGNED", _] -> True
-    _ -> False
-
-enterScope :: String -> TypeM ()
+enterScope :: Text -> TypeM ()
 enterScope name = do
   current <- currentScope
   let level = frameLevel current + 1
-  modify' $
+      newFrame =
+        ScopeFrame
+          { frameLevel = level
+          , frameName = name
+          , frameOrdinary = Map.empty
+          , frameTags = Map.empty
+          }
+  State.modify $
     \st ->
       st
-        { scopeStack =
-            ScopeFrame
-              { frameLevel = level
-              , frameName = name
-              , frameOrdinary = Map.empty
-              , frameTags = Map.empty
-              }
-              : scopeStack st
-        , typeLog = typeLog st <> ["ENTER\t" <> show level <> "\t" <> name]
+        { scopeStack = newFrame :| NE.toList (scopeStack st)
         }
+  appendLog ("ENTER\t" <> tshow level <> "\t" <> name)
 
 exitScope :: TypeM ()
 exitScope = do
   current <- currentScope
   when (frameLevel current == 0) (throw "cannot exit global scope")
-  modify' $ \st ->
+  State.modify $ \st ->
     case scopeStack st of
-      [] -> st
-      _ : rest ->
+      _ :| [] -> st
+      _ :| next : rest ->
         st
-          { scopeStack = rest
-          , typeLog = typeLog st <> ["EXIT\t" <> show (frameLevel current) <> "\t" <> frameName current]
+          { scopeStack = next :| rest
           }
+  appendLog ("EXIT\t" <> tshow (frameLevel current) <> "\t" <> frameName current)
 
-addSymbol :: Namespace -> String -> Symbol -> TypeM ()
+addSymbol :: Namespace -> Text -> Symbol -> TypeM ()
 addSymbol namespace name symbol = do
   current <- currentScope
   when (Map.member name (namespaceMap namespace current)) $
@@ -743,7 +910,7 @@ addSymbol namespace name symbol = do
   current' <- currentScope
   appendLog
     ( "ADD\t"
-        <> show (frameLevel current')
+        <> tshow (frameLevel current')
         <> "\t"
         <> frameName current'
         <> "\t"
@@ -754,27 +921,30 @@ addSymbol namespace name symbol = do
         <> renderTypePretty (symbolType symbol)
     )
 
-setCurrentSymbol :: Namespace -> String -> Symbol -> TypeM ()
+setCurrentSymbol :: Namespace -> Text -> Symbol -> TypeM ()
 setCurrentSymbol namespace name symbol =
-  modify' $ \st ->
+  State.modify $ \st ->
     case scopeStack st of
-      [] -> st
-      frame : rest -> st {scopeStack = setFrame namespace name symbol frame : rest}
+      frame :| rest -> st {scopeStack = setFrame namespace name symbol frame :| rest}
 
-lookupSymbol :: Namespace -> String -> TypeM (Maybe Symbol)
+lookupSymbol :: Namespace -> Text -> TypeM (Maybe Symbol)
 lookupSymbol namespace name = do
-  scopes <- scopeStack <$> get
-  pure (firstJust (map (Map.lookup name . namespaceMap namespace) scopes))
+  scopes <- scopeStack <$> State.get
+  pure (firstJust (map (Map.lookup name . namespaceMap namespace) (NE.toList scopes)))
 
-requireSymbol :: Namespace -> String -> TypeM Symbol
+lookupCurrentSymbol :: Namespace -> Text -> TypeM (Maybe Symbol)
+lookupCurrentSymbol namespace name =
+  Map.lookup name . namespaceMap namespace <$> currentScope
+
+requireSymbol :: Namespace -> Text -> TypeM Symbol
 requireSymbol namespace name =
   lookupSymbol namespace name >>= maybe (throw ("missing symbol: " <> name)) pure
 
-namespaceMap :: Namespace -> ScopeFrame -> Map.Map String Symbol
+namespaceMap :: Namespace -> ScopeFrame -> Map.Map Text Symbol
 namespaceMap Ordinary = frameOrdinary
 namespaceMap Tag = frameTags
 
-setFrame :: Namespace -> String -> Symbol -> ScopeFrame -> ScopeFrame
+setFrame :: Namespace -> Text -> Symbol -> ScopeFrame -> ScopeFrame
 setFrame namespace name symbol frame =
   case namespace of
     Ordinary -> frame {frameOrdinary = Map.insert name symbol (frameOrdinary frame)}
@@ -790,62 +960,61 @@ blankSymbol ty =
     }
 
 currentScope :: TypeM ScopeFrame
-currentScope = do
-  scopes <- scopeStack <$> get
-  case scopes of
-    scope : _ -> pure scope
-    [] -> throw "missing current scope"
+currentScope = NE.head . scopeStack <$> State.get
 
-appendLog :: String -> TypeM ()
-appendLog line = modify' (\st -> st {typeLog = typeLog st <> [line]})
+appendLog :: Text -> TypeM ()
+appendLog line = Writer.tell (Endo (Text.unpack line :))
 
-renderNamespace :: Namespace -> String
+renderNamespace :: Namespace -> Text
 renderNamespace Ordinary = "o"
 renderNamespace Tag = "t"
 
-field :: String -> Node -> TypeM NodeValue
+field :: Text -> Node -> TypeM NodeValue
 field name node =
   maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
 
-fieldNode :: String -> Node -> TypeM Node
+fieldNode :: Text -> Node -> TypeM Node
 fieldNode name node =
   case lookupField name node of
     Just (NodeRef child) -> pure child
     _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeList :: String -> Node -> TypeM [Node]
+fieldNodeList :: Text -> Node -> TypeM [Node]
 fieldNodeList name node =
   case lookupField name node of
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
 
-fieldInt :: String -> Node -> TypeM Integer
+fieldInt :: Text -> Node -> TypeM Integer
 fieldInt name node =
   case lookupField name node of
     Just (IntValue value) -> pure value
     _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
 
-fieldInts :: String -> Node -> TypeM [Integer]
+fieldInts :: Text -> Node -> TypeM [Integer]
 fieldInts name node =
   case lookupField name node of
     Just (IntList values) -> pure values
     _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
 
-declaratorName :: Node -> String
+declaratorName :: Node -> Text
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
-storageClassKind :: Node -> Maybe String
+storageClassKind :: Node -> Maybe Text
 storageClassKind declarationSpecifier =
   fieldNodeMaybe "storage_class" declarationSpecifier >>= \storage ->
     case lookupField "kind" storage of
       Just (StringValue value) -> Just value
       _ -> Nothing
 
-requireName :: String -> Node -> TypeM ()
-requireName expected node =
-  when (nodeName node /= expected) $
-    throw ("expected " <> expected <> ", got " <> nodeName node)
+requireKind :: NodeKind -> Node -> TypeM ()
+requireKind expected node =
+  when (nodeKind node /= expected) $
+    throw ("expected " <> nodeKindName expected <> ", got " <> nodeName node)
 
-throw :: String -> TypeM a
-throw = lift . Left
+throw :: Text -> TypeM a
+throw = Error.throwError_ . Text.unpack
+
+tshow :: Show a => a -> Text
+tshow = Text.pack . show

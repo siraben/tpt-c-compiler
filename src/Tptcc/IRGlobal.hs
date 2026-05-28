@@ -5,11 +5,20 @@ module Tptcc.IRGlobal
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, get, modify', runStateT)
 import Data.List (sortOn)
 import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
+import Data.Monoid (Endo (..), appEndo)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Effectful
+import qualified Effectful.Error.Static as Error
+import Effectful.Reader.Static (Reader)
+import qualified Effectful.Reader.Static as Reader
+import Effectful.State.Static.Local (State)
+import qualified Effectful.State.Static.Local as State
+import Effectful.Writer.Static.Local (Writer)
+import qualified Effectful.Writer.Static.Local as Writer
 
 import Tptcc.Ast
 import Tptcc.CType
@@ -29,37 +38,43 @@ data IRSymbol = IRSymbol
   deriving (Eq, Show)
 
 data IRState = IRState
-  { ordinarySymbols :: Map.Map String IRSymbol
-  , tagSymbols :: Map.Map String IRSymbol
+  { ordinarySymbols :: Map.Map Text IRSymbol
+  , tagSymbols :: Map.Map Text IRSymbol
   , globalOffset :: Integer
-  , globalData :: Map.Map Integer String
-  , currentMethod :: Maybe String
-  , methodLocalSizes :: Map.Map String Integer
-  , placeEvents :: [String]
+  , globalData :: Map.Map Integer Text
+  , methodLocalSizes :: Map.Map Text Integer
   }
   deriving (Eq, Show)
 
 data GlobalInfo = GlobalInfo
   { globalInfoSize :: Integer
-  , globalInfoData :: Map.Map Integer String
+  , globalInfoData :: Map.Map Integer Text
   }
   deriving (Eq, Show)
 
-type IRM = StateT IRState (Either String)
+type IRM = Eff IREffects
+
+type IREffects = '[Reader (Maybe Text), State IRState, Writer (Endo [String]), Error.Error String]
 
 dumpIRGlobals :: Node -> Either String [String]
 dumpIRGlobals ast = do
-  (_, st) <- runStateT (emitProgram ast) initialState
-  pure (renderIRGlobals st)
+  (_, st, events) <- runIR (emitProgram ast)
+  pure (renderIRGlobals st events)
 
 generateIRGlobalInfo :: Node -> Either String GlobalInfo
 generateIRGlobalInfo ast = do
-  (_, st) <- runStateT (emitProgram ast) initialState
+  (_, st, _) <- runIR (emitProgram ast)
   pure
     GlobalInfo
       { globalInfoSize = globalOffset st
       , globalInfoData = globalData st
       }
+
+runIR :: IRM a -> Either String (a, IRState, [String])
+runIR action =
+  case runPureEff (Error.runErrorNoCallStack (Writer.runWriter (State.runState initialState (Reader.runReader Nothing action)))) of
+    Left err -> Left err
+    Right ((value, st), events) -> Right (value, st, appEndo events [])
 
 initialState :: IRState
 initialState =
@@ -68,9 +83,7 @@ initialState =
     , tagSymbols = Map.empty
     , globalOffset = 0
     , globalData = Map.empty
-    , currentMethod = Nothing
     , methodLocalSizes = Map.empty
-    , placeEvents = []
     }
 
 fromDefault :: Symbol -> IRSymbol
@@ -106,7 +119,7 @@ emitDeclaration declaration = do
           place <- emitObject storageKind declaredTy (fieldNodeMaybe "initializer" declarator)
           upsertOrdinary name IRSymbol {irSymbolType = declaredTy, irSymbolPlace = Just place, irSymbolPrototype = False}
 
-emitFunctionSymbol :: String -> CType -> Bool -> IRM ()
+emitFunctionSymbol :: Text -> CType -> Bool -> IRM ()
 emitFunctionSymbol name ty hasBlock = do
   let symbol =
         IRSymbol
@@ -121,7 +134,7 @@ emitFunctionSymbol name ty hasBlock = do
     Just _ -> upsertOrdinary name symbol
     Nothing -> upsertOrdinary name symbol
 
-emitObject :: String -> CType -> Maybe Node -> IRM Place
+emitObject :: Text -> CType -> Maybe Node -> IRM Place
 emitObject storageKind declaredTy initializer =
   case initializer of
     Just initNode -> do
@@ -141,12 +154,12 @@ emitObject storageKind declaredTy initializer =
 
 emitStaticInitializer :: CType -> Node -> Place -> IRM ()
 emitStaticInitializer target initializer start
-  | nodeName initializer == "INITIALIZER" = do
+  | nodeIs NodeInitializer initializer = do
       value <- fieldNode "value" initializer
-      case nodeName value of
-        "INT" -> registerGlobalWord (fieldIntDefault "value" 0 value) start
-        "CHARACTER" -> registerGlobalWord (fieldIntDefault "value" 0 value) start
-        "STRING_LITERAL" ->
+      case nodeKind value of
+        NodeInt -> registerGlobalWord (fieldIntDefault "value" 0 value) start
+        NodeCharacter -> registerGlobalWord (fieldIntDefault "value" 0 value) start
+        NodeStringLiteral ->
           if isCharPointer target
             then do
               stringPlace <- allocateGlobal (stringLength value)
@@ -154,24 +167,27 @@ emitStaticInitializer target initializer start
               registerGlobalWord (placeInteger stringPlace + 1) start
             else registerStringLiteral value start
         _ -> pure ()
-  | nodeName initializer == "INITIALIZER_LIST" = do
+  | nodeIs NodeInitializerList initializer = do
       let children = childNodes initializer
       emitInitializerChildren target children start
   | otherwise = pure ()
 
 emitInitializerChildren :: CType -> [Node] -> Place -> IRM ()
-emitInitializerChildren _ [] _ = pure ()
-emitInitializerChildren target (child : rest) start = do
-  let childTy = initializerElementType target
-  emitStaticInitializer childTy child start
-  emitInitializerChildren target rest start {placeValue = show (placeInteger start + sizeof childTy)}
+emitInitializerChildren target children =
+  go children (initializerChildTypes target)
+  where
+    go [] _ _ = pure ()
+    go _ [] _ = pure ()
+    go (child : rest) (childTy : childTypes) place = do
+      emitStaticInitializer childTy child place
+      go rest childTypes place {placeValue = Text.pack (show (placeInteger place + sizeof childTy))}
 
 registerStringLiteral :: Node -> Place -> IRM ()
 registerStringLiteral node start = do
   let value = fieldStringDefault "value" "" node
-      bytes = map (toInteger . fromEnum) value <> [0]
+      bytes = map (toInteger . fromEnum) (Text.unpack value) <> [0]
   forM_ (zip [placeInteger start ..] bytes) $ \(index, byte) ->
-    setData index (show byte)
+    setData index (Text.pack (show byte))
 
 allocateStringLiteral :: Node -> IRM ()
 allocateStringLiteral node = do
@@ -181,35 +197,35 @@ allocateStringLiteral node = do
 registerGlobalWord :: Integer -> Place -> IRM ()
 registerGlobalWord value place =
   when (placeType place == "g") $
-    setData (placeInteger place) (show value)
+    setData (placeInteger place) (Text.pack (show value))
 
 allocateStatic :: Integer -> IRM Place
 allocateStatic size = do
-  method <- currentMethod <$> get
+  method <- Reader.ask
   case method of
     Nothing -> allocateGlobal size
     Just name -> allocateStack name size
 
 allocateGlobal :: Integer -> IRM Place
 allocateGlobal size = do
-  st <- get
+  st <- State.get
   let offset = globalOffset st
-  modify' (\s -> s {globalOffset = offset + size})
-  pure Place {placeType = "g", placeValue = show offset}
+  State.modify (\s -> s {globalOffset = offset + size})
+  pure Place {placeType = "g", placeValue = Text.pack (show offset)}
 
-allocateStack :: String -> Integer -> IRM Place
+allocateStack :: Text -> Integer -> IRM Place
 allocateStack method size = do
-  st <- get
+  st <- State.get
   let offset = Map.findWithDefault 0 method (methodLocalSizes st)
-  modify' (\s -> s {methodLocalSizes = Map.insert method (offset + size) (methodLocalSizes s)})
-  pure Place {placeType = "l", placeValue = show offset}
+  State.modify (\s -> s {methodLocalSizes = Map.insert method (offset + size) (methodLocalSizes s)})
+  pure Place {placeType = "l", placeValue = Text.pack (show offset)}
 
 allocateVR :: IRM Place
 allocateVR = pure Place {placeType = "vr", placeValue = "vr"}
 
-setData :: Integer -> String -> IRM ()
+setData :: Integer -> Text -> IRM ()
 setData index value =
-  modify' (\st -> st {globalData = Map.insert index value (globalData st)})
+  State.modify (\st -> st {globalData = Map.insert index value (globalData st)})
 
 resolveTypeSpecifier :: Node -> IRM CType
 resolveTypeSpecifier typeSpecifier = do
@@ -222,8 +238,8 @@ resolveTypeSpecifier typeSpecifier = do
           name : _ -> irSymbolType <$> requireOrdinary name
           [] -> throw "empty type specifier"
     NodeRef node
-      | nodeName node == "STRUCT_OR_UNION_SPECIFIER" -> resolveStructOrUnion node
-      | nodeName node == "ENUM_SPECIFIER" -> resolveEnum node
+      | nodeIs NodeStructOrUnionSpecifier node -> resolveStructOrUnion node
+      | nodeIs NodeEnumSpecifier node -> resolveEnum node
       | otherwise -> throw ("unexpected type specifier node: " <> nodeName node)
     _ -> throw "invalid type specifier kind"
 
@@ -263,7 +279,7 @@ resolveEnum node = do
           (identifierValue memberId)
           IRSymbol
             { irSymbolType = base "INT"
-            , irSymbolPlace = Just Place {placeType = "i", placeValue = show value}
+            , irSymbolPlace = Just Place {placeType = "i", placeValue = Text.pack (show value)}
             , irSymbolPrototype = False
             }
       upsertTag name IRSymbol {irSymbolType = enum name memberNames, irSymbolPlace = Nothing, irSymbolPrototype = False}
@@ -282,7 +298,7 @@ buildDirectDeclarator direct ty = do
   let withArrays = foldr array ty dimensions
   withFunction <-
     case fieldNodeMaybe "parameter_list" direct of
-      Just params -> function withArrays <$> buildParameterList params
+      Just params -> buildFunctionType withArrays params
       Nothing -> pure withArrays
   case fieldNodeMaybe "declarator" direct of
     Just nested -> buildDeclarator nested withFunction
@@ -291,6 +307,14 @@ buildDirectDeclarator direct ty = do
 buildParameterList :: Node -> IRM [CType]
 buildParameterList params =
   mapM buildParameter (childNodes params)
+
+buildFunctionType :: CType -> Node -> IRM CType
+buildFunctionType ret params = do
+  parameterTys <- buildParameterList params
+  pure $
+    if hasBoolField "is_variadic" params
+      then variadicFunction ret parameterTys
+      else function ret parameterTys
 
 buildParameter :: Node -> IRM CType
 buildParameter parameter = do
@@ -302,42 +326,42 @@ buildParameter parameter = do
 
 adjustFromInitializer :: Node -> CType -> CType
 adjustFromInitializer initializer ty
-  | nodeName initializer == "INITIALIZER_LIST" =
+  | nodeIs NodeInitializerList initializer =
       case ty of
         ArrayType (-1) target -> ArrayType (fromIntegral (length (childNodes initializer))) target
         _ -> ty
-  | nodeName initializer == "INITIALIZER" =
+  | nodeIs NodeInitializer initializer =
       case (fieldNodeMaybe "value" initializer, ty) of
         (Just valueNode, ArrayType (-1) target)
-          | nodeName valueNode == "STRING_LITERAL" ->
+          | nodeIs NodeStringLiteral valueNode ->
               ArrayType (stringLength valueNode) target
         _ -> ty
   | otherwise = ty
 
 initializerValueType :: CType -> Node -> CType
 initializerValueType target initializer
-  | nodeName initializer == "INITIALIZER" =
+  | nodeIs NodeInitializer initializer =
       case fieldNodeMaybe "value" initializer of
-        Just value | nodeName value == "STRING_LITERAL" && not (isCharPointer target) -> array (stringLength value) (base "CHAR")
+        Just value | nodeIs NodeStringLiteral value && not (isCharPointer target) -> array (stringLength value) (base "CHAR")
         _ -> target
   | otherwise = target
 
-initializerElementType :: CType -> CType
-initializerElementType ty =
+initializerChildTypes :: CType -> [CType]
+initializerChildTypes ty =
   case ty of
-    ArrayType _ target -> target
-    StructType _ (member : _) -> memberType member
-    UnionType _ (member : _) -> memberType member
-    _ -> ty
+    ArrayType _ target -> repeat target
+    StructType _ members' -> map memberType members'
+    UnionType _ (member : _) -> [memberType member]
+    _ -> repeat ty
 
-emitFunctionBody :: String -> Node -> Node -> IRM ()
+emitFunctionBody :: Text -> Node -> Node -> IRM ()
 emitFunctionBody method declarator block = do
-  modify' (\st -> st {currentMethod = Just method, methodLocalSizes = Map.insert method 0 (methodLocalSizes st)})
-  emitParameterPlaces method declarator
-  emitBlockIR method block
-  modify' (\st -> st {currentMethod = Nothing})
+  State.modify (\st -> st {methodLocalSizes = Map.insert method 0 (methodLocalSizes st)})
+  Reader.local (const (Just method)) $ do
+    emitParameterPlaces method declarator
+    emitBlockIR method block
 
-emitParameterPlaces :: String -> Node -> IRM ()
+emitParameterPlaces :: Text -> Node -> IRM ()
 emitParameterPlaces method declarator = do
   direct <- fieldNode "direct_declarator" declarator
   case fieldNodeMaybe "parameter_list" direct of
@@ -348,10 +372,10 @@ emitParameterPlaces method declarator = do
         place <-
           if isAggregate ty
             then allocateStack method (sizeof ty)
-            else pure Place {placeType = "p", placeValue = show index}
+            else pure Place {placeType = "p", placeValue = Text.pack (show index)}
         appendPlaceEvent paramNode method "PARAM" name ty place
 
-buildParameterWithName :: Node -> IRM (Node, String, CType)
+buildParameterWithName :: Node -> IRM (Node, Text, CType)
 buildParameterWithName parameter = do
   typeSpecifier <- fieldNode "type_specifier" parameter
   baseTy <- resolveTypeSpecifier typeSpecifier
@@ -361,48 +385,51 @@ buildParameterWithName parameter = do
       pure (parameter, declaratorName declarator, ty)
     Nothing -> pure (parameter, "", baseTy)
 
-emitBlockIR :: String -> Node -> IRM ()
+emitBlockIR :: Text -> Node -> IRM ()
 emitBlockIR method block =
   mapM_ (emitStatementIR method) (childNodes block)
 
-emitStatementIR :: String -> Node -> IRM ()
+emitStatementIR :: Text -> Node -> IRM ()
 emitStatementIR method statement = do
   child <- fieldNode "child" statement
-  case nodeName child of
-    "DECLARATION" -> emitLocalDeclarationIR method child
-    "IF" -> do
+  case nodeKind child of
+    NodeDeclaration -> emitLocalDeclarationIR method child
+    NodeIf -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "true_case" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "false_case" child)
-    "BLOCK" -> emitBlockIR method child
-    "FOR" -> do
+    NodeBlock -> emitBlockIR method child
+    NodeFor -> do
       maybe (pure ()) (emitForInitializationIR method) (fieldNodeMaybe "initialization" child)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "update" child)
-    "WHILE" -> do
+    NodeWhile -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
-    "DO_WHILE" -> do
+    NodeDoWhile -> do
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
-    "SWITCH" -> do
+    NodeSwitch -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" child)
       maybe (pure ()) (emitBlockIR method) (fieldNodeMaybe "block" child)
-    "CASE" -> do
+    NodeCase -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "value" child)
       maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
-    "DEFAULT" -> maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
-    "RETURN" -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "value" child)
-    "EXPRESSION" -> collectExpressionStrings child
-    _ -> pure ()
+    NodeDefault -> maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
+    NodeGoto -> pure ()
+    NodeLabel -> maybe (pure ()) (emitStatementIR method) (fieldNodeMaybe "statement" child)
+    NodeReturn -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "value" child)
+    NodeExpression -> collectExpressionStrings child
+    NodeAsm -> collectExpressionStrings child
+    _ -> collectExpressionStrings child
 
-emitForInitializationIR :: String -> Node -> IRM ()
+emitForInitializationIR :: Text -> Node -> IRM ()
 emitForInitializationIR method node
-  | nodeName node == "DECLARATION" = emitLocalDeclarationIR method node
+  | nodeIs NodeDeclaration node = emitLocalDeclarationIR method node
   | otherwise = collectExpressionStrings node
 
-emitLocalDeclarationIR :: String -> Node -> IRM ()
+emitLocalDeclarationIR :: Text -> Node -> IRM ()
 emitLocalDeclarationIR method declaration = do
   specifier <- fieldNode "specifier" declaration
   storage <- fieldNode "storage_class" specifier
@@ -420,19 +447,15 @@ emitLocalDeclarationIR method declaration = do
         appendPlaceEvent declarator method "LOCAL" (declaratorName declarator) declaredTy place
 
 withGlobalMethod :: IRM () -> IRM ()
-withGlobalMethod action = do
-  previous <- currentMethod <$> get
-  modify' (\st -> st {currentMethod = Nothing})
-  action
-  modify' (\st -> st {currentMethod = previous})
+withGlobalMethod = Reader.local (const (Nothing :: Maybe Text))
 
-appendPlaceEvent :: Node -> String -> String -> String -> CType -> Place -> IRM ()
+appendPlaceEvent :: Node -> Text -> Text -> Text -> CType -> Place -> IRM ()
 appendPlaceEvent node method kind name ty place = do
   let line =
         "PLACE\t"
-          <> show (rowOf node)
+          <> Text.pack (show (rowOf node))
           <> "\t"
-          <> show (colOf node)
+          <> Text.pack (show (colOf node))
           <> "\t"
           <> method
           <> "\t"
@@ -445,23 +468,23 @@ appendPlaceEvent node method kind name ty place = do
           <> placeType place
           <> "\t"
           <> normalizePlaceValue place
-  modify' (\st -> st {placeEvents = placeEvents st <> [line]})
+  Writer.tell (Endo (Text.unpack line :))
 
 collectExpressionStrings :: Node -> IRM ()
 collectExpressionStrings node =
-  case nodeName node of
-    "STRING_LITERAL" -> allocateStringLiteral node
-    "EXPRESSION" -> mapM_ collectExpressionStrings (childNodes node)
-    "ASSIGNMENT" -> do
+  case nodeKind node of
+    NodeStringLiteral -> allocateStringLiteral node
+    NodeExpression -> mapM_ collectExpressionStrings (childNodes node)
+    NodeAssignment -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "lhs" node)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "rhs" node)
-    "TERNARY" -> do
+    NodeTernary -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "condition" node)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "true_case" node)
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "false_case" node)
-    "UNARY_EXPRESSION" -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "child" node)
-    "CAST_EXPRESSION" -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "cast_expression" node)
-    "POSTFIX_EXPRESSION" -> do
+    NodeUnaryExpression -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "child" node)
+    NodeCastExpression -> maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "cast_expression" node)
+    NodePostfixExpression -> do
       maybe (pure ()) collectExpressionStrings (fieldNodeMaybe "primary_expression" node)
       mapM_ collectPostfixStrings (postfixOps node)
     _ -> do
@@ -492,47 +515,34 @@ collectFieldStrings field' =
 postfixOps :: Node -> [PostfixOp]
 postfixOps node = [op | ChildPostfix op <- nodeChildren node]
 
-renderIRGlobals :: IRState -> [String]
-renderIRGlobals st =
+renderIRGlobals :: IRState -> [String] -> [String]
+renderIRGlobals st events =
   ["GLOBAL_SIZE\t" <> show (globalOffset st)]
     <> map renderData (Map.toAscList (globalData st))
     <> map renderSymbol (sortOn fst (filter isUserGlobal (Map.toList (ordinarySymbols st))))
     <> map renderMethod (Map.toAscList (methodLocalSizes st))
-    <> placeEvents st
+    <> events
 
-renderData :: (Integer, String) -> String
-renderData (index, value) = "DATA\t" <> show index <> "\t" <> value
+renderData :: (Integer, Text) -> String
+renderData (index, value) = "DATA\t" <> show index <> "\t" <> Text.unpack value
 
-renderSymbol :: (String, IRSymbol) -> String
+renderSymbol :: (Text, IRSymbol) -> String
 renderSymbol (name, symbol) =
   "SYMBOL\t"
-    <> name
+    <> Text.unpack name
     <> "\t"
-    <> renderTypePretty (irSymbolType symbol)
+    <> Text.unpack (renderTypePretty (irSymbolType symbol))
     <> "\t"
-    <> maybe "" placeType (irSymbolPlace symbol)
+    <> maybe "" (Text.unpack . placeType) (irSymbolPlace symbol)
     <> "\t"
-    <> maybe "" placeValue (irSymbolPlace symbol)
+    <> maybe "" (Text.unpack . placeValue) (irSymbolPlace symbol)
 
-renderMethod :: (String, Integer) -> String
-renderMethod (name, localSize) = "METHOD\t" <> name <> "\t" <> show localSize
+renderMethod :: (Text, Integer) -> String
+renderMethod (name, localSize) = "METHOD\t" <> Text.unpack name <> "\t" <> show localSize
 
-isUserGlobal :: (String, IRSymbol) -> Bool
+isUserGlobal :: (Text, IRSymbol) -> Bool
 isUserGlobal (name, symbol) =
   name `notElem` map fst defaultSymbols && isJust (irSymbolPlace symbol)
-
-isBaseSpecifiers :: [String] -> Bool
-isBaseSpecifiers specifiers =
-  case specifiers of
-    ["void"] -> True
-    ["char"] -> True
-    ["int"] -> True
-    ["long"] -> True
-    ["signed", _] -> True
-    ["unsigned", _] -> True
-    ["SIGNED", _] -> True
-    ["UNSIGNED", _] -> True
-    _ -> False
 
 isFunctionType :: CType -> Bool
 isFunctionType FunctionType {} = True
@@ -551,13 +561,13 @@ isCharPointer _ = False
 initializerHasStringValue :: Node -> Bool
 initializerHasStringValue node =
   case fieldNodeMaybe "value" node of
-    Just value -> nodeName value == "STRING_LITERAL"
+    Just value -> nodeIs NodeStringLiteral value
     Nothing -> False
 
 stringLength :: Node -> Integer
-stringLength node = fromIntegral (length (fieldStringDefault "value" "" node)) + 1
+stringLength node = fromIntegral (Text.length (fieldStringDefault "value" "" node)) + 1
 
-normalizePlaceValue :: Place -> String
+normalizePlaceValue :: Place -> Text
 normalizePlaceValue place
   | placeType place == "vr" = "vr"
   | otherwise = placeValue place
@@ -577,57 +587,57 @@ decayArrayParameter :: CType -> CType
 decayArrayParameter (ArrayType _ target) = pointer target
 decayArrayParameter ty = ty
 
-lookupOrdinary :: String -> IRM (Maybe IRSymbol)
-lookupOrdinary name = Map.lookup name . ordinarySymbols <$> get
+lookupOrdinary :: Text -> IRM (Maybe IRSymbol)
+lookupOrdinary name = Map.lookup name . ordinarySymbols <$> State.get
 
-requireOrdinary :: String -> IRM IRSymbol
+requireOrdinary :: Text -> IRM IRSymbol
 requireOrdinary name =
   lookupOrdinary name >>= maybe (throw ("missing ordinary symbol: " <> name)) pure
 
-requireTag :: String -> IRM IRSymbol
+requireTag :: Text -> IRM IRSymbol
 requireTag name = do
-  found <- Map.lookup name . tagSymbols <$> get
+  found <- Map.lookup name . tagSymbols <$> State.get
   maybe (throw ("missing tag symbol: " <> name)) pure found
 
-upsertOrdinary :: String -> IRSymbol -> IRM ()
+upsertOrdinary :: Text -> IRSymbol -> IRM ()
 upsertOrdinary name symbol =
-  modify' (\st -> st {ordinarySymbols = Map.insert name symbol (ordinarySymbols st)})
+  State.modify (\st -> st {ordinarySymbols = Map.insert name symbol (ordinarySymbols st)})
 
-upsertTag :: String -> IRSymbol -> IRM ()
+upsertTag :: Text -> IRSymbol -> IRM ()
 upsertTag name symbol =
-  modify' (\st -> st {tagSymbols = Map.insert name symbol (tagSymbols st)})
+  State.modify (\st -> st {tagSymbols = Map.insert name symbol (tagSymbols st)})
 
-field :: String -> Node -> IRM NodeValue
+field :: Text -> Node -> IRM NodeValue
 field name node =
   maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
 
-fieldNode :: String -> Node -> IRM Node
+fieldNode :: Text -> Node -> IRM Node
 fieldNode name node =
   case lookupField name node of
     Just (NodeRef child) -> pure child
     _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
 
-fieldNodeList :: String -> Node -> IRM [Node]
+fieldNodeList :: Text -> Node -> IRM [Node]
 fieldNodeList name node =
   case lookupField name node of
     Just (NodeList children) -> pure children
     _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
 
-fieldInt :: String -> Node -> IRM Integer
+fieldInt :: Text -> Node -> IRM Integer
 fieldInt name node =
   case lookupField name node of
     Just (IntValue value) -> pure value
     _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
 
-fieldInts :: String -> Node -> IRM [Integer]
+fieldInts :: Text -> Node -> IRM [Integer]
 fieldInts name node =
   case lookupField name node of
     Just (IntList values) -> pure values
     _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
 
-declaratorName :: Node -> String
+declaratorName :: Node -> Text
 declaratorName declarator =
   maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
-throw :: String -> IRM a
-throw = lift . Left
+throw :: Text -> IRM a
+throw = Error.throwError_ . Text.unpack

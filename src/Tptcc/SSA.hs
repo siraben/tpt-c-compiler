@@ -4,10 +4,13 @@ module Tptcc.SSA
   ) where
 
 import Control.Applicative ((<|>))
-import Data.List (isSuffixOf, sort, sortBy)
+import Data.Char (isAlphaNum)
+import Data.List (sort, sortBy)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.String as PPString
 
@@ -15,7 +18,7 @@ import Tptcc.Ast (Node)
 import Tptcc.IRSimpleTac (generateSimpleTac)
 import Tptcc.Tac
 
-type BlockId = String
+type BlockId = Text
 
 data RawBlock = RawBlock
   { rawBlockId :: BlockId
@@ -39,7 +42,7 @@ data SSAProgram = SSAProgram
   deriving (Eq, Show)
 
 data SSAMethod = SSAMethod
-  { ssaMethodName :: String
+  { ssaMethodName :: Text
   , ssaMethodLocalSize :: Integer
   , ssaMethodBlocks :: [SSABlock]
   }
@@ -62,9 +65,9 @@ data SSAPhi = SSAPhi
   deriving (Eq, Show)
 
 data SSAInstr = SSAInstr
-  { ssaInstrType :: String
-  , ssaInstrFields :: [(String, SSAPlace)]
-  , ssaInstrStringFields :: [(String, String)]
+  { ssaInstrType :: InstrType
+  , ssaInstrFields :: [(Text, SSAPlace)]
+  , ssaInstrStringFields :: [(Text, Text)]
   }
   deriving (Eq, Show)
 
@@ -91,7 +94,7 @@ data RenameState = RenameState
   }
   deriving (Eq, Show)
 
-type SSAPlaceKey = (String, String, Integer)
+type SSAPlaceKey = (Text, Text, Integer)
 type EdgeCopies = Map.Map BlockId (Map.Map BlockId [Instr])
 
 dumpSSA :: Node -> Either String [String]
@@ -136,13 +139,13 @@ buildRawBlocks instrs
       Map.fromList
         [ (index, placeValue (fieldPlace "target" instr))
         | (index, instr) <- indexed
-        , instrType instr == "label"
+        , instrType instr == ILabel
         ]
     labelTargets =
       Map.fromList
         [ (placeValue (fieldPlace "target" instr), index)
         | (index, instr) <- indexed
-        , instrType instr == "label"
+        , instrType instr == ILabel
         ]
     leaderSet =
       Set.fromList $
@@ -154,7 +157,7 @@ buildRawBlocks instrs
     ranges = zip leaders (drop 1 leaders <> [length instrs])
     blockIdFor start ordinal =
       Map.findWithDefault
-        (if start == 0 then "entry" else ".ssa_bb_" <> show ordinal)
+        (if start == 0 then "entry" else ".ssa_bb_" <> Text.pack (show ordinal))
         start
         labelAtIndex
     blockRanges = zipWith (\ordinal (start, end) -> (blockIdFor start ordinal, start, end)) [(0 :: Int) ..] ranges
@@ -169,7 +172,7 @@ buildRawBlocks instrs
     withoutLabels start end =
       [ (index, instr)
       | (index, instr) <- take (end - start) (drop start indexed)
-      , instrType instr /= "label"
+      , instrType instr /= ILabel
       ]
     blocks =
       [ RawBlock blockId (withoutLabels start end) [] []
@@ -185,7 +188,7 @@ buildRawBlocks instrs
       | block <- blocks
       ]
 
-jumpTargetIndices :: Map.Map String Int -> Instr -> [Int]
+jumpTargetIndices :: Map.Map Text Int -> Instr -> [Int]
 jumpTargetIndices labels instr
   | isJumpInstruction (instrType instr) =
       maybe [] pure (Map.lookup (placeValue (fieldPlace "target" instr)) labels)
@@ -193,18 +196,18 @@ jumpTargetIndices labels instr
 
 terminatesBlock :: Instr -> Bool
 terminatesBlock instr =
-  instrType instr == "ret" || isJumpInstruction (instrType instr)
+  instrType instr == IRet || isJumpInstruction (instrType instr)
 
-blockSuccessors :: Map.Map String BlockId -> Maybe BlockId -> RawBlock -> [BlockId]
+blockSuccessors :: Map.Map Text BlockId -> Maybe BlockId -> RawBlock -> [BlockId]
 blockSuccessors labelToBlock fallthrough block =
   uniqueInOrder $
     case reverse (rawBlockCode block) of
       (_, instr) : _
-        | instrType instr == "jmp" ->
+        | instrType instr == IJmp ->
             targetSuccessor instr
         | isJumpInstruction (instrType instr) ->
             targetSuccessor instr <> maybe [] pure fallthrough
-        | instrType instr == "ret" ->
+        | instrType instr == IRet ->
             []
       _ -> maybe [] pure fallthrough
   where
@@ -603,7 +606,7 @@ copyReplacements method =
     [ (destKey, source)
     | block <- ssaMethodBlocks method
     , (_, instr) <- ssaBlockCode block
-    , ssaInstrType instr == "mov"
+    , ssaInstrType instr == IMov
     , Just source <- [lookup "source" (ssaInstrFields instr)]
     , Just dest <- [lookup "dest" (ssaInstrFields instr)]
     , source /= dest
@@ -613,7 +616,7 @@ copyReplacements method =
 
 isRemovedCopy :: Set.Set SSAPlaceKey -> SSAInstr -> Bool
 isRemovedCopy replaced instr =
-  ssaInstrType instr == "mov"
+  ssaInstrType instr == IMov
     && maybe False (`Set.member` replaced) (lookup "dest" (ssaInstrFields instr) >>= ssaReplacementKey)
 
 applySSAReplacements :: Map.Map SSAPlaceKey SSAPlace -> SSAMethod -> SSAMethod
@@ -637,7 +640,7 @@ applySSAReplacements replacements =
         rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
         uses = Set.fromList (ssaUseFieldNames rawInstr)
         rewriteField name place
-          | name `Set.member` uses || "_in" `isSuffixOf` name = replaceSSAPlace replacements place
+          | name `Set.member` uses || "_in" `Text.isSuffixOf` name = replaceSSAPlace replacements place
           | otherwise = place
 
 replaceSSAPlace :: Map.Map SSAPlaceKey SSAPlace -> SSAPlace -> SSAPlace
@@ -683,64 +686,64 @@ ssaUsedPlaces :: (Place -> Bool) -> Instr -> [Place]
 ssaUsedPlaces ssaPlacePredicate instr =
   uniquePlaces [place | name <- ssaUseFieldNames instr, let place = fieldPlace name instr, ssaPlacePredicate place]
 
-ssaUseFieldNames :: Instr -> [String]
+ssaUseFieldNames :: Instr -> [Text]
 ssaUseFieldNames instr =
   case instrType instr of
-    "st"
+    ISt
       | isDirectStackPlace (fieldPlace "dest" instr) -> ["source"]
       | otherwise -> ["dest", "source"]
-    "ld" -> ["source"]
-    "push" -> ["target"]
-    "pop" -> []
-    "call" -> ["target"]
-    "add3" -> ["source", "offset"]
-    "ldoffset" -> ["source", "offset"]
-    "cmp" -> ["first", "second"]
-    "add" -> useDest
-    "sub" -> useDest
-    "mull" -> useDest
-    "shl" -> useDest
-    "shr" -> useDest
-    "shr3" -> ["source", "third"]
-    "xor" -> useDest
-    "and" -> useDest
-    "or" -> useDest
-    "asm" -> []
-    "mulh" -> ["source", "third"]
-    "mull3" -> ["source", "third"]
-    "sub3" -> ["source", "third"]
+    ILd -> ["source"]
+    IPush -> ["target"]
+    IPop -> []
+    ICall -> ["target"]
+    IAdd3 -> ["source", "offset"]
+    ILdOffset -> ["source", "offset"]
+    ICmp -> ["first", "second"]
+    IAdd -> useDest
+    ISub -> useDest
+    IMull -> useDest
+    IShl -> useDest
+    IShr -> useDest
+    IShr3 -> ["source", "third"]
+    IXor -> useDest
+    IAnd -> useDest
+    IOr -> useDest
+    IAsm -> []
+    IMulh -> ["source", "third"]
+    IMull3 -> ["source", "third"]
+    ISub3 -> ["source", "third"]
     ty
       | isJumpInstruction ty -> []
       | otherwise -> ["source"]
   where
     useDest = ["source", "dest"]
 
-ssaDefFieldNames :: Instr -> [String]
+ssaDefFieldNames :: Instr -> [Text]
 ssaDefFieldNames instr =
   case instrType instr of
-    "st"
+    ISt
       | isDirectStackPlace (fieldPlace "dest" instr) -> ["dest"]
       | otherwise -> []
-    "ld" -> ["dest"]
-    "push" -> []
-    "pop" -> ["target"]
-    "call" -> []
-    "add3" -> ["dest"]
-    "ldoffset" -> ["dest"]
-    "cmp" -> []
-    "add" -> ["dest"]
-    "sub" -> ["dest"]
-    "mull" -> ["dest"]
-    "shl" -> ["dest"]
-    "shr" -> ["dest"]
-    "shr3" -> ["dest"]
-    "xor" -> ["dest"]
-    "and" -> ["dest"]
-    "or" -> ["dest"]
-    "asm" -> []
-    "mulh" -> ["dest"]
-    "mull3" -> ["dest"]
-    "sub3" -> ["dest"]
+    ILd -> ["dest"]
+    IPush -> []
+    IPop -> ["target"]
+    ICall -> []
+    IAdd3 -> ["dest"]
+    ILdOffset -> ["dest"]
+    ICmp -> []
+    IAdd -> ["dest"]
+    ISub -> ["dest"]
+    IMull -> ["dest"]
+    IShl -> ["dest"]
+    IShr -> ["dest"]
+    IShr3 -> ["dest"]
+    IXor -> ["dest"]
+    IAnd -> ["dest"]
+    IOr -> ["dest"]
+    IAsm -> []
+    IMulh -> ["dest"]
+    IMull3 -> ["dest"]
+    ISub3 -> ["dest"]
     ty
       | isJumpInstruction ty -> []
       | otherwise -> ["dest"]
@@ -771,12 +774,12 @@ lowerSSAMethod method =
 
     labelForBlock block
       | ssaBlockId block == "entry" = []
-      | otherwise = [Instr "label" [("target", Place "i" (ssaBlockId block))] []]
+      | otherwise = [Instr ILabel [("target", Place "i" (ssaBlockId block))] []]
 
     lowerBlockCode block copiesFromBlock =
       case reverse loweredCode of
         terminal : restRev
-          | instrType terminal == "jmp" ->
+          | instrType terminal == IJmp ->
               let target = placeValue (fieldPlace "target" terminal)
                   copies = copiesFor target
                in reverse restRev <> copies <> [terminal]
@@ -787,14 +790,14 @@ lowerSSAMethod method =
                   (terminal', targetSplits) = splitConditionalTarget terminal target (copiesFor target)
                   fallthroughJump =
                     case fallthrough of
-                      Just succId -> [Instr "jmp" [("target", Place "i" (splitOrOriginalTarget succId (copiesFor succId)))] []]
+                      Just succId -> [Instr IJmp [("target", Place "i" (splitOrOriginalTarget succId (copiesFor succId)))] []]
                       Nothing -> []
                   fallthroughSplits =
                     case fallthrough of
                       Just succId -> splitBlock succId (copiesFor succId)
                       Nothing -> []
                in reverse restRev <> [terminal'] <> fallthroughJump <> targetSplits <> fallthroughSplits
-          | instrType terminal == "ret" ->
+          | instrType terminal == IRet ->
               loweredCode
         _ ->
           case ssaBlockSuccs block of
@@ -810,9 +813,9 @@ lowerSSAMethod method =
         splitBlock succId copies
           | null copies = []
           | otherwise =
-              [Instr "label" [("target", Place "i" (splitLabel succId))] []]
+              [Instr ILabel [("target", Place "i" (splitLabel succId))] []]
                 <> copies
-                <> [Instr "jmp" [("target", Place "i" succId)] []]
+                <> [Instr IJmp [("target", Place "i" succId)] []]
         splitConditionalTarget terminal target copies
           | null copies = (terminal, [])
           | otherwise =
@@ -834,9 +837,9 @@ ssaPlaceMap method =
   where
     keys = sort (Set.toList (collectSSAPlaceKeys method))
     firstFresh :: Integer
-    firstFresh = maximum (0 : [read value | (_, value, _) <- keys, all (`elem` ['0' .. '9']) value]) + 1
+    firstFresh = maximum (0 : [number | (_, value, _) <- keys, Just number <- [textIntegerMaybe value]]) + 1
     freshPlaces =
-      [ Place ty (show (firstFresh + fromIntegral index))
+      [ Place ty (Text.pack (show (firstFresh + fromIntegral index)))
       | (index, (ty, _, _)) <- zip [(0 :: Int) ..] keys
       ]
 
@@ -861,7 +864,7 @@ ssaPlaceKey place
        in Just (ty, value, version)
   | otherwise = Nothing
 
-ssaVariableKey :: Place -> (String, String)
+ssaVariableKey :: Place -> (Text, Text)
 ssaVariableKey place
   | placeType place == "pr" = ("t", placeValue place)
   | otherwise = (placeType place, placeValue place)
@@ -888,7 +891,7 @@ ssaEdgeCopies placeMap method =
             let dest = lowerSSAPlace placeMap (ssaPhiDest phi)
                 source' = lowerSSAPlace placeMap source
                 copy =
-                  [Instr "mov" [("source", source'), ("dest", dest)] [] | source' /= dest]
+                  [Instr IMov [("source", source'), ("dest", dest)] [] | source' /= dest]
              in Map.insertWith (Map.unionWith (<>)) predId (Map.singleton succId copy) inner
         )
         acc
@@ -901,7 +904,7 @@ lowerSSAInstr placeMap instr =
     baseFields =
       [ (name, lowerSSAPlace placeMap place)
       | (name, place) <- ssaInstrFields instr
-      , not ("_in" `isSuffixOf` name)
+      , not ("_in" `Text.isSuffixOf` name)
       ]
     loweredFields = baseFields
     prefix =
@@ -909,14 +912,14 @@ lowerSSAInstr placeMap instr =
         (Just source, Just dest) ->
           let source' = lowerSSAPlace placeMap source
               dest' = lowerSSAPlace placeMap dest
-           in [Instr "mov" [("source", source'), ("dest", dest')] [] | source' /= dest']
+           in [Instr IMov [("source", source'), ("dest", dest')] [] | source' /= dest']
         _ -> []
 
-sanitizeBlockId :: String -> String
+sanitizeBlockId :: Text -> Text
 sanitizeBlockId =
-  map
+  Text.map
     ( \char ->
-        if char `elem` (['A' .. 'Z'] <> ['a' .. 'z'] <> ['0' .. '9'])
+        if isAlphaNum char
           then char
           else '_'
     )
@@ -930,17 +933,17 @@ prettySSA :: SSAProgram -> PP.Doc ann
 prettySSA program =
   PP.vsep $
     map prettySSAMethod (ssaProgramMethods program)
-      <> [PP.pretty "GLOBAL_SIZE" <> tabDoc <> PP.pretty (show (ssaProgramGlobalSize program))]
+      <> [textDoc "GLOBAL_SIZE" <> tabDoc <> PP.pretty (show (ssaProgramGlobalSize program))]
       <> zipWith prettyGlobalInstr [(1 :: Int) ..] (ssaProgramGlobalInstructions program)
 
 prettySSAMethod :: SSAMethod -> PP.Doc ann
 prettySSAMethod method =
   PP.vsep $
-    [ PP.pretty "METHOD_SSA"
+    [ textDoc "METHOD_SSA"
         <> tabDoc
         <> PP.pretty (ssaMethodName method)
         <> tabDoc
-        <> PP.pretty "LOCAL_SIZE="
+        <> textDoc "LOCAL_SIZE="
         <> PP.pretty (show (ssaMethodLocalSize method))
     ]
       <> map prettySSABlock (ssaMethodBlocks method)
@@ -948,14 +951,14 @@ prettySSAMethod method =
 prettySSABlock :: SSABlock -> PP.Doc ann
 prettySSABlock block =
   PP.vsep $
-    [ PP.pretty "BLOCK"
+    [ textDoc "BLOCK"
         <> tabDoc
         <> PP.pretty (ssaBlockId block)
         <> tabDoc
-        <> PP.pretty "preds="
+        <> textDoc "preds="
         <> commaSepDocs (map PP.pretty (ssaBlockPreds block))
         <> tabDoc
-        <> PP.pretty "succs="
+        <> textDoc "succs="
         <> commaSepDocs (map PP.pretty (ssaBlockSuccs block))
     ]
       <> map prettyPhi (sortBy comparePhi (ssaBlockPhis block))
@@ -966,51 +969,54 @@ comparePhi left right = compare (renderPlace (ssaPhiBase left)) (renderPlace (ss
 
 prettyPhi :: SSAPhi -> PP.Doc ann
 prettyPhi phi =
-  PP.pretty "phi"
+  textDoc "phi"
     <> tabDoc
-    <> PP.pretty "base="
+    <> textDoc "base="
     <> prettyPlace (ssaPhiBase phi)
     <> tabDoc
-    <> PP.pretty "dest="
+    <> textDoc "dest="
     <> prettySSAPlace (ssaPhiDest phi)
     <> tabDoc
-    <> PP.pretty "inputs="
-    <> commaSepDocs [PP.pretty predId <> PP.pretty ":" <> prettySSAPlace place | (predId, place) <- ssaPhiInputs phi]
+    <> textDoc "inputs="
+    <> commaSepDocs [PP.pretty predId <> textDoc ":" <> prettySSAPlace place | (predId, place) <- ssaPhiInputs phi]
 
 prettySSAInstr :: Int -> SSAInstr -> PP.Doc ann
 prettySSAInstr index instr =
   PP.pretty (show index)
     <> tabDoc
-    <> PP.pretty (ssaInstrType instr)
+    <> PP.pretty (instrMnemonic (ssaInstrType instr))
     <> PP.hcat (map prettyField (ssaInstrFields instr))
     <> PP.hcat (map prettyStringField (ssaInstrStringFields instr))
 
 prettyGlobalInstr :: Int -> Instr -> PP.Doc ann
 prettyGlobalInstr index instr =
-  PP.pretty "GLOBAL"
+  textDoc "GLOBAL"
     <> tabDoc
     <> PP.pretty (show index)
     <> tabDoc
-    <> PP.pretty (instrType instr)
-    <> PP.hcat [tabDoc <> PP.pretty name <> PP.pretty "=" <> prettyPlace place | (name, place) <- instrFields instr]
+    <> PP.pretty (instrMnemonic (instrType instr))
+    <> PP.hcat [tabDoc <> PP.pretty name <> textDoc "=" <> prettyPlace place | (name, place) <- instrFields instr]
     <> PP.hcat (map prettyStringField (instrStringFields instr))
 
-prettyField :: (String, SSAPlace) -> PP.Doc ann
-prettyField (name, place) = tabDoc <> PP.pretty name <> PP.pretty "=" <> prettySSAPlace place
+prettyField :: (Text, SSAPlace) -> PP.Doc ann
+prettyField (name, place) = tabDoc <> PP.pretty name <> textDoc "=" <> prettySSAPlace place
 
-prettyStringField :: (String, String) -> PP.Doc ann
-prettyStringField (name, value) = tabDoc <> PP.pretty name <> PP.pretty "=" <> PP.pretty value
+prettyStringField :: (Text, Text) -> PP.Doc ann
+prettyStringField (name, value) = tabDoc <> PP.pretty name <> textDoc "=" <> PP.pretty value
 
 prettySSAPlace :: SSAPlace -> PP.Doc ann
 prettySSAPlace place =
   prettyPlace (ssaPlaceBase place)
-    <> maybe mempty (\version -> PP.pretty "#" <> PP.pretty (show version)) (ssaPlaceVersion place)
+    <> maybe mempty (\version -> textDoc "#" <> PP.pretty (show version)) (ssaPlaceVersion place)
 
 prettyPlace :: Place -> PP.Doc ann
-prettyPlace place = PP.pretty (placeType place) <> PP.pretty ":" <> PP.pretty (placeValue place)
+prettyPlace place = PP.pretty (placeType place) <> textDoc ":" <> PP.pretty (placeValue place)
 
 commaSepDocs :: [PP.Doc ann] -> PP.Doc ann
-commaSepDocs = PP.hcat . PP.punctuate (PP.pretty ",")
+commaSepDocs = PP.hcat . PP.punctuate (textDoc ",")
 
 tabDoc :: PP.Doc ann
-tabDoc = PP.pretty "\t"
+tabDoc = textDoc "\t"
+
+textDoc :: Text -> PP.Doc ann
+textDoc = PP.pretty

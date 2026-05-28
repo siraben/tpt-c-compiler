@@ -4,6 +4,8 @@ module Tptcc.Token
   , TokenValue (..)
   ) where
 
+import Data.Text (Text)
+
 data SourcePos = SourcePos
   { row :: !Int
   , col :: !Int
@@ -11,13 +13,13 @@ data SourcePos = SourcePos
   deriving (Eq, Ord, Show)
 
 data TokenValue
-  = ValueString String
+  = ValueString Text
   | ValueInt Integer
   deriving (Eq, Ord, Show)
 
 data Token = Token
   { tokenTypeId :: !Int
-  , tokenName :: String
+  , tokenName :: Text
   , tokenValue :: TokenValue
   , tokenPos :: SourcePos
   }

@@ -4,25 +4,31 @@ module Tptcc.Parser
 
 import Control.Monad (unless, void, when)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, modify')
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Void (Void)
+import Effectful
+import Effectful.State.Static.Local (State)
+import qualified Effectful.State.Static.Local as State
 import qualified Text.Megaparsec as MP
 
 import Tptcc.Ast
 import Tptcc.Token
 
 newtype ParserState = ParserState
-  { parserTypedefs :: Set.Set String
+  { parserTypedefs :: Set.Set Text
   }
   deriving (Eq, Show)
 
-type ParserM = StateT ParserState (MP.Parsec Void [Token])
+type ParserM = MP.ParsecT Void [Token] (Eff ParserEffects)
+
+type ParserEffects = '[State ParserState]
 
 parse :: [Token] -> Either String Node
 parse tokens =
-  case MP.runParser (evalStateT parseProgram ParserState {parserTypedefs = Set.empty}) "<tokens>" tokens of
+  case fst (runPureEff (State.runState ParserState {parserTypedefs = Set.empty} (MP.runParserT parseProgram "<tokens>" tokens))) of
     Left err -> Left (show err)
     Right ast -> Right ast
 
@@ -144,7 +150,7 @@ parseTypeSpecifier = do
       kinds <- gatherTypeKinds
       pure node {nodeFields = [NodeField "kind" (StringList kinds)]}
 
-parseTypeQualifiers :: ParserM [String]
+parseTypeQualifiers :: ParserM [Text]
 parseTypeQualifiers = do
   hasQualifier <- check "TYPE_QUALIFIER"
   if hasQualifier
@@ -154,7 +160,7 @@ parseTypeQualifiers = do
       pure (qualifier : rest)
     else pure []
 
-gatherTypeKinds :: ParserM [String]
+gatherTypeKinds :: ParserM [Text]
 gatherTypeKinds = do
   isType <- isTypeSpecifierStart
   if isType
@@ -651,7 +657,7 @@ parseAsm = do
   expect ")"
   pure node {nodeFields = [NodeField "asm" (StringValue (joinAsm asmParts))] <> inputFields <> outputFields <> clobberFields}
 
-parseAsmStrings :: ParserM [String]
+parseAsmStrings :: ParserM [Text]
 parseAsmStrings = do
   hasString <- check "STRING_LITERAL"
   if hasString
@@ -841,7 +847,7 @@ parseSumExpression = parseBinaryNode "SUM_EXPRESSION" ["+", "-"] parseTerm
 parseTerm :: ParserM Node
 parseTerm = parseBinaryNode "MULTIPLICATIVE_EXPRESSION" ["*", "/", "%"] parseCastExpression
 
-parseBinaryNode :: String -> [String] -> ParserM Node -> ParserM Node
+parseBinaryNode :: Text -> [Text] -> ParserM Node -> ParserM Node
 parseBinaryNode nodeName' operators subParser = do
   firstOperand <- subParser
   hasOperator <- anyCheck operators
@@ -852,7 +858,7 @@ parseBinaryNode nodeName' operators subParser = do
       pure node {nodeChildren = children}
     else pure firstOperand
 
-parseBinaryRest :: [String] -> ParserM Node -> [NodeChild] -> ParserM [NodeChild]
+parseBinaryRest :: [Text] -> ParserM Node -> [NodeChild] -> ParserM [NodeChild]
 parseBinaryRest operators subParser childrenRev = do
   hasOperator <- anyCheck operators
   if hasOperator
@@ -862,7 +868,7 @@ parseBinaryRest operators subParser childrenRev = do
       parseBinaryRest operators subParser (ChildNode operand : ChildToken opToken : childrenRev)
     else pure (reverse childrenRev)
 
-parseOperandOnlyNode :: String -> [String] -> ParserM Node -> ParserM Node
+parseOperandOnlyNode :: Text -> [Text] -> ParserM Node -> ParserM Node
 parseOperandOnlyNode nodeName' operators subParser = do
   firstOperand <- subParser
   hasOperator <- anyCheck operators
@@ -873,7 +879,7 @@ parseOperandOnlyNode nodeName' operators subParser = do
       pure node {nodeChildren = map ChildNode children}
     else pure firstOperand
 
-parseOperandOnlyRest :: [String] -> ParserM Node -> [Node] -> ParserM [Node]
+parseOperandOnlyRest :: [Text] -> ParserM Node -> [Node] -> ParserM [Node]
 parseOperandOnlyRest operators subParser childrenRev = do
   hasOperator <- anyCheck operators
   if hasOperator
@@ -989,7 +995,7 @@ parseSizeofExpression = do
       parseUnaryExpression
   pure node {nodeFields = [NodeField "operator" (StringValue "SIZEOF"), NodeField "child" (NodeRef child)]}
 
-parseUnaryWithChild :: String -> String -> ParserM Node -> ParserM Node
+parseUnaryWithChild :: Text -> Text -> ParserM Node -> ParserM Node
 parseUnaryWithChild name op childParser = do
   node <- emptyNode name
   child <- childParser
@@ -1108,23 +1114,25 @@ parseIdentifier = do
     failAt token "Unexpected identifier"
   pure node {nodePos = tokenPos token, nodeFields = [NodeField "id" (StringValue (tokenString token))]}
 
-emptyNode :: String -> ParserM Node
+emptyNode :: Text -> ParserM Node
 emptyNode name = do
   token <- peekToken
   emptyNodeAt name (tokenPos token)
 
-emptyNodeAt :: String -> SourcePos -> ParserM Node
+emptyNodeAt :: Text -> SourcePos -> ParserM Node
 emptyNodeAt name pos =
+  let kind = nodeKindFor name
+   in
   pure
     Node
       { nodeTypeId = nodeTypeIdFor name
-      , nodeName = name
+      , nodeKind = kind
       , nodePos = pos
       , nodeChildren = []
       , nodeFields = []
       }
 
-manyUntil :: String -> ParserM Node -> ParserM [Node]
+manyUntil :: Text -> ParserM Node -> ParserM [Node]
 manyUntil end parser = go []
   where
     go nodesRev = do
@@ -1136,24 +1144,24 @@ manyUntil end parser = go []
           go (item : nodesRev)
 
 peekToken :: ParserM Token
-peekToken = lift (MP.lookAhead MP.anySingle)
+peekToken = MP.lookAhead MP.anySingle
 
 nextToken :: ParserM Token
-nextToken = lift MP.anySingle
+nextToken = MP.anySingle
 
-check :: String -> ParserM Bool
+check :: Text -> ParserM Bool
 check expected = do
   token <- peekToken
   pure (tokenName token == expected)
 
-anyCheck :: [String] -> ParserM Bool
+anyCheck :: [Text] -> ParserM Bool
 anyCheck names = do
   token <- peekToken
   pure (tokenName token `elem` names)
 
-checkAt :: Int -> String -> ParserM Bool
+checkAt :: Int -> Text -> ParserM Bool
 checkAt offset expected = do
-  tokens <- lift MP.getInput
+  tokens <- MP.getInput
   case drop offset tokens of
     token : _ -> pure (tokenName token == expected)
     [] -> pure False
@@ -1168,7 +1176,7 @@ isTypeSpecifierStart = do
 
 isTypeNameAt :: Int -> ParserM Bool
 isTypeNameAt offset = do
-  tokens <- lift MP.getInput
+  tokens <- MP.getInput
   case drop offset tokens of
     token : _ ->
       case tokenName token of
@@ -1180,22 +1188,22 @@ isTypeNameAt offset = do
 
 isTypedefNameToken :: Token -> ParserM Bool
 isTypedefNameToken token = do
-  typedefs <- parserTypedefs <$> get
+  typedefs <- parserTypedefs <$> lift State.get
   pure (tokenName token == "ID" && Set.member (tokenString token) typedefs)
 
-accept :: String -> ParserM Bool
+accept :: Text -> ParserM Bool
 accept expected = do
   matches <- check expected
   when matches (void nextToken)
   pure matches
 
-expect :: String -> ParserM ()
+expect :: Text -> ParserM ()
 expect expected = do
   token <- nextToken
   unless (tokenName token == expected) $
     failAt token ("Expected " <> expected)
 
-countWhile :: String -> ParserM Integer
+countWhile :: Text -> ParserM Integer
 countWhile expected = do
   accepted <- accept expected
   if accepted
@@ -1205,20 +1213,20 @@ countWhile expected = do
 rememberTypedef :: Node -> ParserM ()
 rememberTypedef declarator =
   case stringField "id" (directDeclaratorId declarator) <|> stringField "value" (directDeclaratorId declarator) of
-    Just name -> modify' (\state -> state {parserTypedefs = Set.insert name (parserTypedefs state)})
+    Just name -> lift (State.modify (\state -> state {parserTypedefs = Set.insert name (parserTypedefs state)}))
     Nothing -> pure ()
 
-tokenString :: Token -> String
+tokenString :: Token -> Text
 tokenString token =
   case tokenValue token of
     ValueString value -> value
-    ValueInt value -> show value
+    ValueInt value -> Text.pack (show value)
 
 tokenInteger :: Token -> Integer
 tokenInteger token =
   case tokenValue token of
     ValueInt value -> value
-    ValueString value -> read value
+    ValueString value -> read (Text.unpack value)
 
 constantValue :: Node -> Integer
 constantValue node =
@@ -1339,7 +1347,7 @@ parameterIsVoidOnly parameter =
       [NodeField _ (NodeRef typeSpecifier)] -> stringListField "kind" typeSpecifier == Just ["void"] && not (hasField "declarator" parameter)
       _ -> False
 
-storageClassKind :: Node -> Maybe String
+storageClassKind :: Node -> Maybe Text
 storageClassKind declarationSpecifier =
   case fieldByName "storage_class" declarationSpecifier of
     [NodeField _ (NodeRef storageClass)] -> stringField "kind" storageClass
@@ -1351,51 +1359,46 @@ specifierTypeNode declarationSpecifier =
     [NodeField _ (NodeRef typeSpecifier)] -> typeSpecifier
     _ -> declarationSpecifier
 
-hasBoolField :: String -> Node -> Bool
+hasBoolField :: Text -> Node -> Bool
 hasBoolField name node =
   case fieldByName name node of
     [NodeField _ (BoolValue True)] -> True
     _ -> False
 
-hasField :: String -> Node -> Bool
+hasField :: Text -> Node -> Bool
 hasField name node = not (null (fieldByName name node))
 
 hasBlockField :: Node -> Bool
 hasBlockField = hasField "block"
 
-fieldByName :: String -> Node -> [NodeField]
+fieldByName :: Text -> Node -> [NodeField]
 fieldByName name node = filter ((== name) . fieldName) (nodeFields node)
 
-stringField :: String -> Node -> Maybe String
+stringField :: Text -> Node -> Maybe Text
 stringField name node =
   case fieldByName name node of
     [NodeField _ (StringValue value)] -> Just value
     _ -> Nothing
 
-stringListField :: String -> Node -> Maybe [String]
+stringListField :: Text -> Node -> Maybe [Text]
 stringListField name node =
   case fieldByName name node of
     [NodeField _ (StringList value)] -> Just value
     _ -> Nothing
 
-stripQuotes :: String -> String
+stripQuotes :: Text -> Text
 stripQuotes value =
-  case value of
-    '"' : rest ->
-      case reverse rest of
-        '"' : middle -> reverse middle
-        _ -> value
-    _ -> value
+  if Text.length value >= 2 && Text.head value == '"' && Text.last value == '"'
+    then Text.init (Text.tail value)
+    else value
 
-joinAsm :: [String] -> String
-joinAsm [] = ""
-joinAsm [value] = value
-joinAsm (value : values) = value <> "\n\t" <> joinAsm values
+joinAsm :: [Text] -> Text
+joinAsm = Text.intercalate "\n\t"
 
 addField :: NodeField -> Node -> Node
 addField field node = node {nodeFields = nodeFields node <> [field]}
 
-removeField :: String -> Node -> Node
+removeField :: Text -> Node -> Node
 removeField name node = node {nodeFields = filter ((/= name) . fieldName) (nodeFields node)}
 
 ifM :: Monad m => m Bool -> m a -> m a -> m a
@@ -1403,19 +1406,19 @@ ifM cond ifTrue ifFalse = do
   result <- cond
   if result then ifTrue else ifFalse
 
-failAtPeek :: String -> ParserM a
+failAtPeek :: Text -> ParserM a
 failAtPeek message = peekToken >>= \token -> failAt token message
 
-failAt :: Token -> String -> ParserM a
+failAt :: Token -> Text -> ParserM a
 failAt token message =
-  lift . fail $
-    message
+  fail $
+    Text.unpack message
       <> " at "
       <> show (row (tokenPos token))
       <> ":"
       <> show (col (tokenPos token))
       <> " near "
-      <> show (tokenString token)
+      <> show (Text.unpack (tokenString token))
 
 listToMaybe :: [a] -> Maybe a
 listToMaybe [] = Nothing

@@ -34,9 +34,17 @@ executable tptcc-hs
   build-depends:
     base >=4.16 && <5,
     containers,
+    effectful,
     filepath,
     megaparsec,
     prettyprinter,
+    text,
     transformers
+  default-extensions:
+    DataKinds
+    DerivingStrategies
+    LambdaCase
+    OverloadedStrings
+    TypeOperators
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat -O2

@@ -17,66 +17,67 @@ module Tptcc.NodeFields
   ) where
 
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import Tptcc.Ast
 import Tptcc.Token (tokenName)
 
 childNodes :: Node -> [Node]
 childNodes node = [child | ChildNode child <- nodeChildren node]
 
-lookupField :: String -> Node -> Maybe NodeValue
+lookupField :: Text -> Node -> Maybe NodeValue
 lookupField name node =
   firstJust [Just value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
 
-fieldNodeMaybe :: String -> Node -> Maybe Node
+fieldNodeMaybe :: Text -> Node -> Maybe Node
 fieldNodeMaybe name node =
   case lookupField name node of
     Just (NodeRef child) -> Just child
     _ -> Nothing
 
-fieldNodeListMaybe :: String -> Node -> Maybe [Node]
+fieldNodeListMaybe :: Text -> Node -> Maybe [Node]
 fieldNodeListMaybe name node =
   case lookupField name node of
     Just (NodeList children) -> Just children
     _ -> Nothing
 
-fieldIntMaybe :: String -> Node -> Maybe Integer
+fieldIntMaybe :: Text -> Node -> Maybe Integer
 fieldIntMaybe name node =
   case lookupField name node of
     Just (IntValue value) -> Just value
     _ -> Nothing
 
-fieldIntDefault :: String -> Integer -> Node -> Integer
+fieldIntDefault :: Text -> Integer -> Node -> Integer
 fieldIntDefault name fallback node =
   fromMaybe fallback (fieldIntMaybe name node)
 
-fieldIntsDefault :: String -> [Integer] -> Node -> [Integer]
+fieldIntsDefault :: Text -> [Integer] -> Node -> [Integer]
 fieldIntsDefault name fallback node =
   case lookupField name node of
     Just (IntList values) -> values
     _ -> fallback
 
-fieldStringDefault :: String -> String -> Node -> String
+fieldStringDefault :: Text -> Text -> Node -> Text
 fieldStringDefault name fallback node =
   case lookupField name node of
     Just (StringValue value) -> value
     _ -> fallback
 
-boolFieldDefault :: String -> Bool -> Node -> Bool
+boolFieldDefault :: Text -> Bool -> Node -> Bool
 boolFieldDefault name fallback node =
   case lookupField name node of
     Just (BoolValue value) -> value
     _ -> fallback
 
-hasBoolField :: String -> Node -> Bool
+hasBoolField :: Text -> Node -> Bool
 hasBoolField name = boolFieldDefault name False
 
-hasNodeField :: String -> Node -> Bool
+hasNodeField :: Text -> Node -> Bool
 hasNodeField name node =
   case lookupField name node of
     Just (NodeRef _) -> True
     _ -> False
 
-identifierValue :: Node -> String
+identifierValue :: Node -> Text
 identifierValue node = fieldStringDefault "id" (fieldStringDefault "value" "" node) node
 
 firstJust :: [Maybe a] -> Maybe a
@@ -94,14 +95,14 @@ enumMemberValues members =
           name = maybe "" identifierValue (fieldNodeMaybe "id" member)
        in (value + 1, (member, value) : values, (name, value) : env)
 
-constantValue :: [(String, Integer)] -> Node -> Integer
+constantValue :: [(Text, Integer)] -> Node -> Integer
 constantValue env node =
-  case nodeName node of
-    "INT" -> fieldIntDefault "value" 0 node
-    "CHARACTER" -> fieldIntDefault "value" 0 node
-    "IDENTIFIER" -> fromMaybe 0 (lookup (identifierValue node) env)
-    "EXPRESSION" -> last (0 : map (constantValue env) (childNodes node))
-    "UNARY_EXPRESSION" ->
+  case nodeKind node of
+    NodeInt -> fieldIntDefault "value" 0 node
+    NodeCharacter -> fieldIntDefault "value" 0 node
+    NodeIdentifier -> fromMaybe 0 (lookup (identifierValue node) env)
+    NodeExpression -> last (0 : map (constantValue env) (childNodes node))
+    NodeUnaryExpression ->
       let value = maybe 0 (constantValue env) (fieldNodeMaybe "child" node)
        in case fieldStringDefault "operator" "" node of
             "+" -> value
@@ -110,28 +111,28 @@ constantValue env node =
             "!" -> if value == 0 then 1 else 0
             "SIZEOF" -> 1
             _ -> value
-    "CAST_EXPRESSION" -> maybe 0 (constantValue env) (fieldNodeMaybe "cast_expression" node)
-    "TERNARY" ->
+    NodeCastExpression -> maybe 0 (constantValue env) (fieldNodeMaybe "cast_expression" node)
+    NodeTernary ->
       if maybe 0 (constantValue env) (fieldNodeMaybe "condition" node) /= 0
         then maybe 0 (constantValue env) (fieldNodeMaybe "true_case" node)
         else maybe 0 (constantValue env) (fieldNodeMaybe "false_case" node)
-    "LOGICAL_OR_EXPRESSION" -> boolInt (any ((/= 0) . constantValue env) (childNodes node))
-    "LOGICAL_AND_EXPRESSION" -> boolInt (all ((/= 0) . constantValue env) (childNodes node))
-    "INCLUSIVE_OR_EXPRESSION" -> foldl integerBitOr 0 (map (constantValue env) (childNodes node))
-    "INCLUSIVE_XOR_EXPRESSION" -> foldl xorInteger 0 (map (constantValue env) (childNodes node))
-    "INCLUSIVE_AND_EXPRESSION" -> foldl1Safe integerBitAnd (map (constantValue env) (childNodes node))
-    "EQUALITY_EXPRESSION" -> compareChain env node
-    "RELATIONAL_EXPRESSION" -> compareChain env node
-    "SHIFT_EXPRESSION" -> evalInfix env node
-    "SUM_EXPRESSION" -> evalInfix env node
-    "MULTIPLICATIVE_EXPRESSION" -> evalInfix env node
+    NodeLogicalOrExpression -> boolInt (any ((/= 0) . constantValue env) (childNodes node))
+    NodeLogicalAndExpression -> boolInt (all ((/= 0) . constantValue env) (childNodes node))
+    NodeInclusiveOrExpression -> foldl integerBitOr 0 (map (constantValue env) (childNodes node))
+    NodeInclusiveXorExpression -> foldl xorInteger 0 (map (constantValue env) (childNodes node))
+    NodeInclusiveAndExpression -> foldl1Safe integerBitAnd (map (constantValue env) (childNodes node))
+    NodeEqualityExpression -> compareChain env node
+    NodeRelationalExpression -> compareChain env node
+    NodeShiftExpression -> evalInfix env node
+    NodeSumExpression -> evalInfix env node
+    NodeMultiplicativeExpression -> evalInfix env node
     _ -> 0
 
 boolInt :: Bool -> Integer
 boolInt True = 1
 boolInt False = 0
 
-evalInfix :: [(String, Integer)] -> Node -> Integer
+evalInfix :: [(Text, Integer)] -> Node -> Integer
 evalInfix env node =
   case nodeChildren node of
     ChildNode firstNode : rest -> go (constantValue env firstNode) rest
@@ -153,7 +154,7 @@ evalInfix env node =
        in go next rest
     go acc _ = acc
 
-compareChain :: [(String, Integer)] -> Node -> Integer
+compareChain :: [(Text, Integer)] -> Node -> Integer
 compareChain env node =
   case nodeChildren node of
     ChildNode firstNode : rest -> go (constantValue env firstNode) rest

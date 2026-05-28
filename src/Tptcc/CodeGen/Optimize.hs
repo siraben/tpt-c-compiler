@@ -15,6 +15,8 @@ import Data.List (find, sort, sortBy)
 import Data.Maybe (isJust, listToMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Tptcc.CodeGen.Options
 import Tptcc.Tac
@@ -27,7 +29,7 @@ promoteScalarLocals instrs =
       Set.fromList
         [ placeInteger target
         | instr <- instrs
-        , instrType instr == "!get_address"
+        , instrType instr == IGetAddress
         , let target = fieldPlace "target" instr
         , placeType target == "l"
         ]
@@ -42,7 +44,7 @@ promoteScalarLocals instrs =
     firstTemp = 1 + maximum (0 : [placeInteger place | instr <- instrs, (_, place) <- instrFields instr, isVirtualRegister place])
     localRegisters =
       Map.fromList
-        [ (slot, Place "t" (show (firstTemp + fromIntegral index)))
+        [ (slot, Place "t" (Text.pack (show (firstTemp + fromIntegral index))))
         | (index, slot) <- zip [(0 :: Int) ..] (Set.toAscList promotable)
         ]
 
@@ -50,20 +52,20 @@ promoteScalarLocals instrs =
       Map.lookup (placeInteger place) localRegisters
 
     rewriteInstr instr
-      | instrType instr == "st"
+      | instrType instr == ISt
       , placeType (fieldPlace "dest" instr) == "l"
       , Just dest <- promotedLocal (fieldPlace "dest" instr) =
-          Instr "mov" [("source", fieldPlace "source" instr), ("dest", dest)] []
-      | instrType instr == "ld"
+          Instr IMov [("source", fieldPlace "source" instr), ("dest", dest)] []
+      | instrType instr == ILd
       , placeType (fieldPlace "source" instr) == "l"
       , Just source <- promotedLocal (fieldPlace "source" instr) =
-          Instr "mov" [("source", source), ("dest", fieldPlace "dest" instr)] []
+          Instr IMov [("source", source), ("dest", fieldPlace "dest" instr)] []
       | otherwise = instr
 
 optimizeInstructions :: [Instr] -> [Instr]
 optimizeInstructions = eliminateDeadVirtualWrites . propagateCopiesAndConstants
 
-type CopyEnv = Map.Map (String, String) Place
+type CopyEnv = Map.Map (Text, Text) Place
 
 propagateCopiesAndConstants :: [Instr] -> [Instr]
 propagateCopiesAndConstants = reverse . snd . foldl' step (Map.empty, [])
@@ -78,10 +80,10 @@ propagateCopiesAndConstants = reverse . snd . foldl' step (Map.empty, [])
 
 instructionStopsPropagation :: Instr -> Bool
 instructionStopsPropagation instr =
-  instrType instr == "label"
-    || instrType instr == "call"
-    || instrType instr == "asm"
-    || instrType instr == "ret"
+  instrType instr == ILabel
+    || instrType instr == ICall
+    || instrType instr == IAsm
+    || instrType instr == IRet
     || isJumpInstruction (instrType instr)
 
 rewriteInstructionUses :: CopyEnv -> Instr -> Instr
@@ -97,25 +99,25 @@ rewriteInstructionUses env instr =
                 else resolved
       | otherwise = place
 
-fieldAcceptsImmediate :: Instr -> String -> Bool
+fieldAcceptsImmediate :: Instr -> Text -> Bool
 fieldAcceptsImmediate instr name =
   case instrType instr of
-    "mov" -> name == "source"
-    "cmp" -> name == "second"
-    "add3" -> name `elem` ["source", "offset"]
-    "ldoffset" -> name == "offset"
-    "mulh" -> name == "third"
-    "mull3" -> name == "third"
-    "sub3" -> name == "third"
-    "shr3" -> name == "third"
-    "add" -> name == "source"
-    "sub" -> name == "source"
-    "mull" -> name == "source"
-    "shl" -> name == "source"
-    "shr" -> name == "source"
-    "xor" -> name == "source"
-    "and" -> name == "source"
-    "or" -> name == "source"
+    IMov -> name == "source"
+    ICmp -> False
+    IAdd3 -> name `elem` ["source", "offset"]
+    ILdOffset -> name == "offset"
+    IMulh -> name == "third"
+    IMull3 -> name == "third"
+    ISub3 -> name == "third"
+    IShr3 -> name == "third"
+    IAdd -> name == "source"
+    ISub -> name == "source"
+    IMull -> name == "source"
+    IShl -> name == "source"
+    IShr -> name == "source"
+    IXor -> name == "source"
+    IAnd -> name == "source"
+    IOr -> name == "source"
     _ -> False
 
 resolveEnvPlace :: CopyEnv -> Place -> Place
@@ -128,7 +130,7 @@ resolveEnvPlace env = go Set.empty
           | Just next <- Map.lookup key env -> go (Set.insert key seen) next
         _ -> place
 
-definedPlaceKeys :: Instr -> [(String, String)]
+definedPlaceKeys :: Instr -> [(Text, Text)]
 definedPlaceKeys instr =
   [ key
   | name <- defFieldNames instr
@@ -138,7 +140,7 @@ definedPlaceKeys instr =
 
 updateCopyEnv :: CopyEnv -> Instr -> CopyEnv
 updateCopyEnv env instr
-  | instrType instr == "mov"
+  | instrType instr == IMov
   , Just destKey <- placeKey (fieldPlace "dest" instr)
   , isPropagatablePlace source =
       Map.insert destKey source env
@@ -184,10 +186,10 @@ pureVirtualDefinition instr =
       _ -> False
 
 data BasicBlock = BasicBlock
-  { blockId :: String
+  { blockId :: Text
   , blockCode :: [(Int, Instr)]
-  , blockPred :: [String]
-  , blockSucc :: [String]
+  , blockPred :: [Text]
+  , blockSucc :: [Text]
   , blockUse :: Set.Set Integer
   , blockDef :: Set.Set Integer
   , blockLiveIn :: Set.Set Integer
@@ -196,7 +198,7 @@ data BasicBlock = BasicBlock
   }
   deriving (Eq, Show)
 
-emptyBlock :: String -> [String] -> [String] -> BasicBlock
+emptyBlock :: Text -> [Text] -> [Text] -> BasicBlock
 emptyBlock ident predIds succIds =
   BasicBlock
     { blockId = ident
@@ -231,7 +233,7 @@ allocateMethodRegisters nextSpillSlot currentTac =
           used = usedAllocatedRegisters rewritten
        in pure (rewritten, used, nextSpillSlot)
     Left reg ->
-      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (show nextSpillSlot)) currentTac)
+      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (Text.pack (show nextSpillSlot))) currentTac)
 
 colourTac :: [Instr] -> Either Integer (Map.Map Integer Integer)
 colourTac tac =
@@ -249,7 +251,7 @@ buildBasicBlocks :: [Instr] -> [BasicBlock]
 buildBasicBlocks tac = finalBlocks
   where
     step (currentId, blockMap, orderRev, orderLength) (index, instr)
-      | instrType instr == "label" =
+      | instrType instr == ILabel =
           let target = placeValue (fieldPlace "target" instr)
               blockMap1 = addSucc currentId target blockMap
               (blockMap2, orderRev2, orderLength2) =
@@ -258,7 +260,7 @@ buildBasicBlocks tac = finalBlocks
                   else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
               blockMap3 = Map.adjust (\b -> b {blockCode = [(index, instr)]}) target blockMap2
            in (target, blockMap3, orderRev2, orderLength2)
-      | instrType instr == "jmp" =
+      | instrType instr == IJmp =
           let target = placeValue (fieldPlace "target" instr)
               blockMap1 = addSucc currentId target blockMap
               (blockMap2, orderRev2, orderLength2) =
@@ -266,7 +268,7 @@ buildBasicBlocks tac = finalBlocks
                   then (addPred target currentId blockMap1, orderRev, orderLength)
                   else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
               blockMap3 = prependCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> show orderLength2
+              anonId = "anon_block" <> Text.pack (show orderLength2)
               (blockMap4, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [] []) blockMap3 orderRev2 orderLength2
            in (anonId, blockMap4, orderRev3, orderLength3)
       | isJumpInstruction (instrType instr) =
@@ -277,7 +279,7 @@ buildBasicBlocks tac = finalBlocks
                   then (addPred target currentId blockMap1, orderRev, orderLength)
                   else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
               blockMap3 = prependCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> show orderLength2
+              anonId = "anon_block" <> Text.pack (show orderLength2)
               blockMap4 = addSucc currentId anonId blockMap3
               (blockMap5, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [currentId] []) blockMap4 orderRev2 orderLength2
            in (anonId, blockMap5, orderRev3, orderLength3)
@@ -296,19 +298,19 @@ normalizeBlock block =
     , blockSucc = reverse (blockSucc block)
     }
 
-insertBlock :: BasicBlock -> Map.Map String BasicBlock -> [String] -> Int -> (Map.Map String BasicBlock, [String], Int)
+insertBlock :: BasicBlock -> Map.Map Text BasicBlock -> [Text] -> Int -> (Map.Map Text BasicBlock, [Text], Int)
 insertBlock block blockMap orderRev orderLength =
   (Map.insert (blockId block) block blockMap, blockId block : orderRev, orderLength + 1)
 
-prependCode :: String -> (Int, Instr) -> Map.Map String BasicBlock -> Map.Map String BasicBlock
+prependCode :: Text -> (Int, Instr) -> Map.Map Text BasicBlock -> Map.Map Text BasicBlock
 prependCode ident code =
   Map.adjust (\block -> block {blockCode = code : blockCode block}) ident
 
-addSucc :: String -> String -> Map.Map String BasicBlock -> Map.Map String BasicBlock
+addSucc :: Text -> Text -> Map.Map Text BasicBlock -> Map.Map Text BasicBlock
 addSucc ident succId =
   Map.adjust (\block -> block {blockSucc = succId : blockSucc block}) ident
 
-addPred :: String -> String -> Map.Map String BasicBlock -> Map.Map String BasicBlock
+addPred :: Text -> Text -> Map.Map Text BasicBlock -> Map.Map Text BasicBlock
 addPred ident predId =
   Map.adjust (\block -> block {blockPred = predId : blockPred block}) ident
 
@@ -332,7 +334,7 @@ livenessAnalysis blocks =
       fixed = livenessFixedPoint blockMap
    in [fixed Map.! blockId block | block <- blocks]
 
-livenessFixedPoint :: Map.Map String BasicBlock -> Map.Map String BasicBlock
+livenessFixedPoint :: Map.Map Text BasicBlock -> Map.Map Text BasicBlock
 livenessFixedPoint blockMap =
   let (changed, nextMap) = Map.mapAccumWithKey updateBlock False blockMap
    in if changed then livenessFixedPoint nextMap else nextMap
@@ -459,12 +461,12 @@ usedAllocatedRegisters instrs =
 allocatedPhysicalRegister :: Place -> Maybe Integer
 allocatedPhysicalRegister place
   | placeType place == "r" =
-      case reads (placeValue place) of
-        [(reg, "")] | reg `elem` callerSafeRegisters -> Just reg
+      case placeIntegerMaybe place of
+        Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
   | placeType place `elem` ["t", "pr", "vr"] =
-      case reads (placeValue place) of
-        [(reg, "")] | reg `elem` callerSafeRegisters -> Just reg
+      case placeIntegerMaybe place of
+        Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
   | otherwise = Nothing
 
@@ -473,7 +475,7 @@ movePreferences =
   foldl' addPreference Map.empty
   where
     addPreference preferences instr
-      | instrType instr == "mov"
+      | instrType instr == IMov
           && isVirtualRegister source
           && isVirtualRegister dest =
           Map.insertWith (<>) (placeInteger source) [placeInteger dest] $
@@ -497,7 +499,7 @@ spillVirtualRegister reg spillSlot =
           useScratch = Map.fromList [(name, scratchForUse index) | (index, (name, _)) <- zip [(0 :: Int) ..] usedFields]
           defScratch = Map.fromList [(name, Map.findWithDefault spillScratchA name useScratch) | (name, _) <- defFields]
           scratchByField = Map.union useScratch defScratch
-          loads = [Instr "ld" [("source", spillSlot), ("dest", scratch)] [] | scratch <- uniquePlaces (Map.elems useScratch)]
+          loads = [Instr ILd [("source", spillSlot), ("dest", scratch)] [] | scratch <- uniquePlaces (Map.elems useScratch)]
           rewritten =
             instr
               { instrFields =
@@ -505,7 +507,7 @@ spillVirtualRegister reg spillSlot =
                   | (name, place) <- instrFields instr
                   ]
               }
-          stores = [Instr "st" [("source", scratch), ("dest", spillSlot)] [] | scratch <- uniquePlaces (Map.elems defScratch)]
+          stores = [Instr ISt [("source", scratch), ("dest", spillSlot)] [] | scratch <- uniquePlaces (Map.elems defScratch)]
        in loads <> [rewritten] <> stores
 
     isSpilled place =
@@ -527,7 +529,7 @@ rewritePlace :: Map.Map Integer Integer -> Place -> Place
 rewritePlace colours place
   | placeType place `elem` ["t", "pr", "vr"] =
       case Map.lookup (placeInteger place) colours of
-        Just colour -> Place "r" (show colour)
+        Just colour -> Place "r" (Text.pack (show colour))
         Nothing -> place
   | otherwise = place
 
@@ -537,122 +539,110 @@ instructionUseDef instr =
   where
     regSet names = Set.fromList [placeInteger place | name <- names, let place = fieldPlace name instr, isVirtualRegister place]
 
-useFieldNames :: Instr -> [String]
+useFieldNames :: Instr -> [Text]
 useFieldNames instr =
   case instrType instr of
-    "st" -> ["dest", "source"]
-    "ld" -> ["source"]
-    "push" -> ["target"]
-    "pop" -> []
-    "call" -> ["target"]
-    "add3" -> ["source", "offset"]
-    "ldoffset" -> ["source", "offset"]
-    "cmp" -> ["first", "second"]
-    "add" -> useDest
-    "sub" -> useDest
-    "mull" -> useDest
-    "shl" -> useDest
-    "shr" -> useDest
-    "shr3" -> ["source", "third"]
-    "xor" -> useDest
-    "and" -> useDest
-    "or" -> useDest
-    "asm" -> []
-    "mulh" -> ["source", "third"]
-    "mull3" -> ["source", "third"]
-    "sub3" -> ["source", "third"]
+    ISt -> ["dest", "source"]
+    ILd -> ["source"]
+    IPush -> ["target"]
+    IPop -> []
+    ICall -> ["target"]
+    IAdd3 -> ["source", "offset"]
+    ILdOffset -> ["source", "offset"]
+    ICmp -> ["first", "second"]
+    IAdd -> useDest
+    ISub -> useDest
+    IMull -> useDest
+    IShl -> useDest
+    IShr -> useDest
+    IShr3 -> ["source", "third"]
+    IXor -> useDest
+    IAnd -> useDest
+    IOr -> useDest
+    IAsm -> []
+    IMulh -> ["source", "third"]
+    IMull3 -> ["source", "third"]
+    ISub3 -> ["source", "third"]
     ty
-      | take 1 ty == "j" -> []
+      | isJumpInstruction ty -> []
       | otherwise -> ["source"]
   where
     useDest = ["source", "dest"]
 
-defFieldNames :: Instr -> [String]
+defFieldNames :: Instr -> [Text]
 defFieldNames instr =
   case instrType instr of
-    "st" -> []
-    "ld" -> ["dest"]
-    "push" -> []
-    "pop" -> ["target"]
-    "call" -> []
-    "add3" -> ["dest"]
-    "ldoffset" -> ["dest"]
-    "cmp" -> []
-    "add" -> ["dest"]
-    "sub" -> ["dest"]
-    "mull" -> ["dest"]
-    "shl" -> ["dest"]
-    "shr" -> ["dest"]
-    "shr3" -> ["dest"]
-    "xor" -> ["dest"]
-    "and" -> ["dest"]
-    "or" -> ["dest"]
-    "asm" -> []
-    "mulh" -> ["dest"]
-    "mull3" -> ["dest"]
-    "sub3" -> ["dest"]
+    ISt -> []
+    ILd -> ["dest"]
+    IPush -> []
+    IPop -> ["target"]
+    ICall -> []
+    IAdd3 -> ["dest"]
+    ILdOffset -> ["dest"]
+    ICmp -> []
+    IAdd -> ["dest"]
+    ISub -> ["dest"]
+    IMull -> ["dest"]
+    IShl -> ["dest"]
+    IShr -> ["dest"]
+    IShr3 -> ["dest"]
+    IXor -> ["dest"]
+    IAnd -> ["dest"]
+    IOr -> ["dest"]
+    IAsm -> []
+    IMulh -> ["dest"]
+    IMull3 -> ["dest"]
+    ISub3 -> ["dest"]
     ty
-      | take 1 ty == "j" -> []
+      | isJumpInstruction ty -> []
       | otherwise -> ["dest"]
 
 peephole :: CodeGenOptions -> [Instr] -> [Instr]
 peephole _ [] = []
-peephole options instrs =
+peephole _ instrs =
   foldr step [] instrs
   where
     step c acc@(nc : rest)
-      | instrType c == "mov" && fieldPlace "source" c == fieldPlace "dest" c = acc
+      | instrType c == IMov && fieldPlace "source" c == fieldPlace "dest" c = acc
       | pureRegisterDefinition c
       , Just def <- singleDefPlace c
       , Just nextDef <- singleDefPlace nc
       , def == nextDef
       , def `notElem` usePlaces nc =
           acc
-      | instrType c == "st" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc =
+      | instrType c == ISt && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc =
           if fieldPlace "source" c == fieldPlace "dest" nc
             then c : rest
-            else c : Instr "mov" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == "add3" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr "ldoffset" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "offset" c)] [] : rest
-      | instrType c == "mov" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr "ld" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == "add" && instrType nc == "ld" && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr "ldoffset" [("source", fieldPlace "source" nc), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" c)] [] : rest
-      | instrType c == "mov" && instrType nc == "add" && fieldPlace "dest" c == fieldPlace "dest" nc && isVirtualRegister (fieldPlace "source" c) =
-          Instr "add3" [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" nc)] [] : rest
-      | instrType c == "mov"
-      , instrType nc == "add"
+            else c : Instr IMov [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
+      | instrType c == IAdd3 && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
+          Instr ILdOffset [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "offset" c)] [] : rest
+      | instrType c == IMov && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
+          Instr ILd [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
+      | instrType c == IAdd && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
+          Instr ILdOffset [("source", fieldPlace "source" nc), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" c)] [] : rest
+      | instrType c == IMov && instrType nc == IAdd && fieldPlace "dest" c == fieldPlace "dest" nc && isVirtualRegister (fieldPlace "source" c) =
+          Instr IAdd3 [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" nc)] [] : rest
+      | instrType c == IMov
+      , instrType nc == IAdd
       , fieldPlace "dest" c == fieldPlace "dest" nc
       , placeType (fieldPlace "source" c) == "i"
       , placeType (fieldPlace "source" nc) == "i"
       , Just first <- placeIntegerMaybe (fieldPlace "source" c)
       , Just second <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr "mov" [("source", Place "i" (show (first + second))), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == "add" && fieldPlace "source" c == Place "i" "0" = acc
-      | instrType c == "add3"
-      , instrType nc == "add"
+          Instr IMov [("source", Place "i" (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" nc)] [] : rest
+      | instrType c == IAdd && fieldPlace "source" c == Place "i" "0" = acc
+      | instrType c == IAdd3
+      , instrType nc == IAdd
       , fieldPlace "source" c == Place "r" "base_pointer"
       , placeType (fieldPlace "offset" c) == "i"
       , placeType (fieldPlace "source" nc) == "i"
       , fieldPlace "dest" c == fieldPlace "dest" nc
       , Just offset <- placeIntegerMaybe (fieldPlace "offset" c)
       , Just source <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr "add3" [("source", Place "r" "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place "i" (show (offset + source)))] [] : rest
-      | instrType c == "jmp" && instrType nc == "label" && fieldPlace "target" c == fieldPlace "target" nc = acc
-      | instrType c == "mov" && instrType nc == "cmp" && fieldPlace "dest" c == fieldPlace "second" nc && placeType (fieldPlace "source" c) `elem` ["i", "g"] =
-          Instr "cmp" [("first", fieldPlace "first" nc), ("second", cmpImmediate options (fieldPlace "source" c))] [] : rest
+          Instr IAdd3 [("source", Place "r" "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place "i" (Text.pack (show (offset + source))))] [] : rest
+      | instrType c == IJmp && instrType nc == ILabel && fieldPlace "target" c == fieldPlace "target" nc = acc
       | otherwise = c : acc
     step c [] = [c]
-
-    cmpImmediate opts place
-      | placeType place == "g" = Place "i" (show (codeGenGlobalAddr opts + placeInteger place))
-      | otherwise = place
-
-placeIntegerMaybe :: Place -> Maybe Integer
-placeIntegerMaybe place =
-  case reads (placeValue place) of
-    [(value, "")] -> Just value
-    _ -> Nothing
 
 finalizeOptimizedInstructions :: CodeGenOptions -> [Instr] -> [Instr]
 finalizeOptimizedInstructions options = go (8 :: Int)
@@ -671,7 +661,7 @@ collapseAdjacentLabels instrs =
     kept = reverse keptRev
 
     step (aliasMap, out, previousLabel) instr
-      | instrType instr == "label" =
+      | instrType instr == ILabel =
           let target = fieldPlace "target" instr
            in case previousLabel of
                 Just canonical ->
@@ -680,7 +670,7 @@ collapseAdjacentLabels instrs =
                   (aliasMap, instr : out, Just target)
       | otherwise = (aliasMap, instr : out, Nothing)
 
-rewriteLabelAliases :: Map.Map String String -> Instr -> Instr
+rewriteLabelAliases :: Map.Map Text Text -> Instr -> Instr
 rewriteLabelAliases aliases instr =
   instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
   where
@@ -688,7 +678,7 @@ rewriteLabelAliases aliases instr =
       | placeType place == "i" = place {placeValue = resolveLabelAlias aliases (placeValue place)}
       | otherwise = place
 
-resolveLabelAlias :: Map.Map String String -> String -> String
+resolveLabelAlias :: Map.Map Text Text -> Text -> Text
 resolveLabelAlias aliases = go Set.empty
   where
     go seen label
@@ -724,7 +714,7 @@ eliminateDeadPhysicalWrites instrs =
 
 physicalInstructionUseDef :: Instr -> (Set.Set Integer, Set.Set Integer)
 physicalInstructionUseDef instr
-  | instrType instr == "asm" = (allAllocatable, allAllocatable)
+  | instrType instr == IAsm = (allAllocatable, allAllocatable)
   | otherwise = (regSet (useFieldNames instr), regSet (defFieldNames instr))
   where
     allAllocatable = Set.fromList allocatableRegisters
@@ -745,8 +735,8 @@ purePhysicalDefinition instr =
 physicalAllocatableRegister :: Place -> Maybe Integer
 physicalAllocatableRegister place
   | placeType place == "r" =
-      case reads (placeValue place) of
-        [(reg, "")] | reg `elem` allocatableRegisters -> Just reg
+      case placeIntegerMaybe place of
+        Just reg | reg `elem` allocatableRegisters -> Just reg
         _ -> Nothing
   | otherwise = Nothing
 
@@ -759,7 +749,7 @@ optimizeMethodTail method =
     stripTrailingExitJump instrs =
       case reverse instrs of
         instr : rest
-          | instrType instr == "jmp"
+          | instrType instr == IJmp
               && fieldPlace "target" instr == exitTarget ->
               reverse rest
         _ -> instrs
@@ -779,8 +769,8 @@ removeReturnRoundTrip :: [Instr] -> [Instr]
 removeReturnRoundTrip instrs =
   case reverse instrs of
     restore : save : rest
-      | instrType save == "mov"
-          && instrType restore == "mov"
+      | instrType save == IMov
+          && instrType restore == IMov
           && fieldPlace "source" save == Place "r" "return_reg"
           && fieldPlace "dest" save == fieldPlace "source" restore
           && fieldPlace "dest" restore == Place "r" "return_reg" ->
@@ -797,11 +787,11 @@ trailingDeadWrite instr =
     && maybe False isCallerSafePhysicalRegister (singleDefPlace instr)
 
 isLabelInstruction :: Instr -> Bool
-isLabelInstruction instr = instrType instr == "label"
+isLabelInstruction instr = instrType instr == ILabel
 
 pureRegisterDefinition :: Instr -> Bool
 pureRegisterDefinition instr =
-  instrType instr `elem` ["mov", "add", "sub", "mull", "shl", "shr", "xor", "and", "or", "add3", "shr3", "mulh", "mull3", "sub3"]
+  instrType instr `elem` [IMov, IAdd, ISub, IMull, IShl, IShr, IXor, IAnd, IOr, IAdd3, IShr3, IMulh, IMull3, ISub3]
 
 singleDefPlace :: Instr -> Maybe Place
 singleDefPlace instr =

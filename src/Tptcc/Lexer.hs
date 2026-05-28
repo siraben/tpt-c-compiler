@@ -4,6 +4,7 @@ module Tptcc.Lexer
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, toLower, toUpper)
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 import Numeric (readHex)
 
 import Tptcc.Token
@@ -48,7 +49,7 @@ keywordPrefixToken wordsToMatch nameOf continuation line column source =
   case firstPrefix wordsToMatch source of
     Just word
       | not (continues word) ->
-          Just (mkToken (nameOf word) (ValueString word) line column, line, column + length word, drop (length word) source)
+          Just (mkToken (nameOf word) (ValueString (Text.pack word)) line column, line, column + length word, drop (length word) source)
     _ -> Nothing
   where
     continues word =
@@ -66,7 +67,7 @@ firstPrefix (word : wordsToMatch) source =
 operator :: Scanner
 operator line column source =
   case matchOperator source of
-    Just op -> Just (mkToken (map toUpper op) (ValueString op) line column, line, column + length op, drop (length op) source)
+    Just op -> Just (mkToken (map toUpper op) (ValueString (Text.pack op)) line column, line, column + length op, drop (length op) source)
     Nothing -> Nothing
 
 matchOperator :: String -> Maybe String
@@ -110,7 +111,6 @@ matchOperator source =
     '?' : _ -> Just "?"
     ':' : _ -> Just ":"
     '~' : _ -> Just "~"
-    's' : 'i' : 'z' : 'e' : 'o' : 'f' : _ -> Just "sizeof"
     _ -> Nothing
 
 identifier :: Scanner
@@ -120,7 +120,7 @@ identifier line column source =
       | isIdentStart c ->
           let ident = takeWhile isIdentContinue source
               name = Map.findWithDefault "ID" ident keywordTokenNames
-           in Just (mkToken name (ValueString ident) line column, line, column + length ident, drop (length ident) source)
+           in Just (mkToken name (ValueString (Text.pack ident)) line column, line, column + length ident, drop (length ident) source)
     _ -> Nothing
 
 keywordTokenNames :: Map.Map String String
@@ -139,6 +139,7 @@ keywordTokenNames =
     , ("case", "CASE")
     , ("default", "DEFAULT")
     , ("asm", "ASM")
+    , ("sizeof", "SIZEOF")
     , ("auto", "STORAGE_CLASS")
     , ("extern", "STORAGE_CLASS")
     , ("register", "STORAGE_CLASS")
@@ -167,7 +168,7 @@ stringLiteral line column source =
        in case drop (length body) rest of
             '"' : _ ->
               let raw = '"' : body ++ "\""
-               in Just (mkToken "STRING_LITERAL" (ValueString (decodeStringEscapes raw)) line column, line, column + consumed, drop consumed source)
+               in Just (mkToken "STRING_LITERAL" (ValueString (Text.pack (decodeStringEscapes raw))) line column, line, column + consumed, drop consumed source)
             _ -> Nothing
     _ -> Nothing
 
@@ -219,7 +220,7 @@ punctuation line column source =
   case source of
     c : rest
       | c `elem` ("(){};,[]" :: String) ->
-          Just (mkToken [c] (ValueString [c]) line column, line, column + 1, rest)
+          Just (mkToken [c] (ValueString (Text.singleton c)) line column, line, column + 1, rest)
     _ -> Nothing
 
 otherToken :: Scanner
@@ -227,7 +228,7 @@ otherToken line column source =
   let other = takeWhile (not . isSpaceLua) source
    in if null other
         then Nothing
-        else Just (mkToken "OTHER" (ValueString other) line column, line, column + length other, drop (length other) source)
+        else Just (mkToken "OTHER" (ValueString (Text.pack other)) line column, line, column + length other, drop (length other) source)
 
 dropSpaceAndComments :: Int -> Int -> String -> (Int, Int, String)
 dropSpaceAndComments line column source =
@@ -276,7 +277,7 @@ decodeCharacter :: String -> TokenValue
 decodeCharacter "'\\n'" = ValueInt 10
 decodeCharacter "'\\\\'" = ValueInt 92
 decodeCharacter [_, c, _] = ValueInt (fromIntegral (fromEnum c))
-decodeCharacter raw = ValueString raw
+decodeCharacter raw = ValueString (Text.pack raw)
 
 parseInteger :: String -> Integer
 parseInteger raw =
@@ -295,7 +296,7 @@ mkToken :: String -> TokenValue -> Int -> Int -> Token
 mkToken name value line column =
   Token
     { tokenTypeId = tokenTypeIdFor name
-    , tokenName = name
+    , tokenName = Text.pack name
     , tokenValue = value
     , tokenPos = SourcePos {row = line, col = column}
     }
@@ -364,6 +365,7 @@ tokenNames =
   , "CASE"
   , "DEFAULT"
   , "."
+  , "..."
   , "+="
   , "-="
   , "*="

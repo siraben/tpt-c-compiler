@@ -9,6 +9,8 @@ module Tptcc.SymbolTable
   ) where
 
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Tptcc.CType
 import Tptcc.Operand
@@ -26,8 +28,8 @@ data Symbol = Symbol
 
 data Scope = Scope
   { scopeLevel :: Int
-  , tagSymbols :: Map.Map String Symbol
-  , ordinarySymbols :: Map.Map String Symbol
+  , tagSymbols :: Map.Map Text Symbol
+  , ordinarySymbols :: Map.Map Text Symbol
   , parentScope :: Maybe Scope
   }
   deriving (Eq, Show)
@@ -41,7 +43,7 @@ defaultScope =
     , parentScope = Nothing
     }
 
-defaultSymbols :: [(String, Symbol)]
+defaultSymbols :: [(Text, Symbol)]
 defaultSymbols =
   [ constSymbol "NULL" (pointer (base "VOID")) 0
   , stdFunction "__print_unsigned_int" (function (base "VOID") [base "INT"]) "__tptcc_fn_print_unsigned_int" Nothing
@@ -88,33 +90,33 @@ defaultSymbols =
   , constSymbol "TERM_DEFAULT" (base "INT") 0x25
   ]
 
-addSymbol :: Namespace -> String -> Symbol -> Scope -> Either String Scope
+addSymbol :: Namespace -> Text -> Symbol -> Scope -> Either String Scope
 addSymbol namespace name symbol scope =
   case namespaceLookup namespace name scope of
     Just existing
       | symbolIsPrototype existing -> Right scope
-      | otherwise -> Left ("Symbol '" <> name <> "' has already been defined")
+      | otherwise -> Left ("Symbol '" <> Text.unpack name <> "' has already been defined")
     Nothing -> Right (setSymbol namespace name symbol scope)
 
-getSymbol :: Namespace -> String -> Scope -> Maybe Symbol
+getSymbol :: Namespace -> Text -> Scope -> Maybe Symbol
 getSymbol namespace name scope =
   case namespaceLookup namespace name scope of
     Just symbol -> Just symbol
     Nothing -> parentScope scope >>= getSymbol namespace name
 
-setSymbol :: Namespace -> String -> Symbol -> Scope -> Scope
+setSymbol :: Namespace -> Text -> Symbol -> Scope -> Scope
 setSymbol namespace name symbol scope =
   case namespace of
     TagNamespace -> scope {tagSymbols = Map.insert name symbol (tagSymbols scope)}
     OrdinaryNamespace -> scope {ordinarySymbols = Map.insert name symbol (ordinarySymbols scope)}
 
-namespaceLookup :: Namespace -> String -> Scope -> Maybe Symbol
+namespaceLookup :: Namespace -> Text -> Scope -> Maybe Symbol
 namespaceLookup namespace name scope =
   case namespace of
     TagNamespace -> Map.lookup name (tagSymbols scope)
     OrdinaryNamespace -> Map.lookup name (ordinarySymbols scope)
 
-stdFunction :: String -> CType -> String -> Maybe Bool -> (String, Symbol)
+stdFunction :: Text -> CType -> Text -> Maybe Bool -> (Text, Symbol)
 stdFunction name ty target isVariadic =
   ( name
   , Symbol
@@ -134,7 +136,7 @@ stdFunction name ty target isVariadic =
       }
   )
 
-constSymbol :: String -> CType -> Integer -> (String, Symbol)
+constSymbol :: Text -> CType -> Integer -> (Text, Symbol)
 constSymbol name ty value =
   ( name
   , Symbol

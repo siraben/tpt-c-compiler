@@ -4,13 +4,16 @@ module Tptcc.Operand
   , renderOperandValue
   ) where
 
+import Data.Text (Text)
+import qualified Data.Text as Text
+
 data OperandValue
   = OperandInt Integer
-  | OperandName String
+  | OperandName Text
   deriving (Eq, Ord, Show)
 
 data Operand = Operand
-  { operandType :: String
+  { operandType :: Text
   , operandValue :: OperandValue
   , operandOffset :: Maybe Operand
   , operandIsStandardFunction :: Bool
@@ -18,6 +21,6 @@ data Operand = Operand
   }
   deriving (Eq, Show)
 
-renderOperandValue :: OperandValue -> String
-renderOperandValue (OperandInt value) = show value
+renderOperandValue :: OperandValue -> Text
+renderOperandValue (OperandInt value) = Text.pack (show value)
 renderOperandValue (OperandName value) = value

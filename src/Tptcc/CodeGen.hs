@@ -7,6 +7,7 @@ module Tptcc.CodeGen
   ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 
 import Tptcc.Ast (Node)
 import Tptcc.CodeGen.Optimize
@@ -122,8 +123,6 @@ header options globalInfo =
     , "    " <> renderGlobalData options globalInfo
     , "init:"
     , "    mov term_reg, 0x25"
-    , "                              "
-    , "    ld r0, term_base              "
     , "    mov r1, { term_width 1 - 5 << }"
     , "    st r1, term_hrange"
     , "    mov r1, { term_height 1 - 5 << }"
@@ -142,7 +141,7 @@ header options globalInfo =
 renderGlobalData :: CodeGenOptions -> GlobalInfo -> String
 renderGlobalData options globalInfo
   | globalInfoSize globalInfo == 0 = ""
-  | otherwise = "dw " <> commaSep (replicate (fromInteger (codeGenGlobalAddr options - 1)) "0" <> [Map.findWithDefault "0" index (globalInfoData globalInfo) | index <- [0 .. globalInfoSize globalInfo - 1]])
+  | otherwise = "dw " <> commaSep (replicate (fromInteger (codeGenGlobalAddr options - 1)) "0" <> [Text.unpack (Map.findWithDefault "0" index (globalInfoData globalInfo)) | index <- [0 .. globalInfoSize globalInfo - 1]])
 
 commaSep :: [String] -> String
 commaSep [] = ""
@@ -196,16 +195,17 @@ renderMethod options optimized method = do
         | frameLocalSize > 0 = "\tadd stack_pointer, " <> show frameLocalSize <> "\n"
         | otherwise = ""
   renderedInstructions <- mapM (renderInstr options allocatedLocalSize) lowered
+  let methodName = Text.unpack (methodOutputName method)
   pure $
     "__tptcc_fn_"
-      <> methodOutputName method
+      <> methodName
       <> ":\n"
       <> localAllocation
       <> frameSetup
       <> concatMap (\reg -> "\tpush r" <> show reg <> "\n") savedRegisters
       <> concat renderedInstructions
       <> ".exit_"
-      <> methodOutputName method
+      <> methodName
       <> ":\n"
       <> concatMap (\reg -> "\tpop r" <> show reg <> "\n") (reverse savedRegisters)
       <> frameTeardown
@@ -226,21 +226,21 @@ renderMethod options optimized method = do
 
 lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
 lowerAbstract options localSize instr
-  | instrType instr == "!get_address" =
+  | instrType instr == IGetAddress =
       case (lookup "target" (instrFields instr), lookup "dest" (instrFields instr)) of
         (Just target, Just dest) -> emitGetAddress localSize target dest
         _ -> instr
-  | instrType instr == "!debug_breakpoint" =
-      Instr "st" [("source", Place "r" "r0"), ("dest", Place "g" (show (codeGenBaseAddr options + 0x80 - codeGenGlobalAddr options)))] []
-  | instrType instr == "!debug_function_call" =
-      Instr "st" [("source", fieldPlace "target" instr), ("dest", Place "g" (show (codeGenBaseAddr options + 0x8001 - codeGenGlobalAddr options)))] []
+  | instrType instr == IDebugBreakpoint =
+      Instr ISt [("source", Place "r" "r0"), ("dest", Place "g" (Text.pack (show (codeGenBaseAddr options + 0x80 - codeGenGlobalAddr options))))] []
+  | instrType instr == IDebugFunctionCall =
+      Instr ISt [("source", fieldPlace "target" instr), ("dest", Place "g" (Text.pack (show (codeGenBaseAddr options + 0x8001 - codeGenGlobalAddr options))))] []
   | otherwise = instr
 
 emitGetAddress :: Integer -> Place -> Place -> Instr
 emitGetAddress localSize target dest =
   case placeType target of
-    "g" -> Instr "mov" [("source", target), ("dest", dest)] []
-    "p" -> Instr "add3" [("source", Place "r" "base_pointer"), ("offset", Place "i" (show (localSize + placeInteger target + 2))), ("dest", dest)] []
-    "l" -> Instr "add3" [("source", Place "r" "base_pointer"), ("offset", Place "i" (show (placeInteger target + 1))), ("dest", dest)] []
-    "pr" -> Instr "mov" [("source", target), ("dest", dest)] []
-    _ -> Instr "nop" [] []
+    "g" -> Instr IMov [("source", target), ("dest", dest)] []
+    "p" -> Instr IAdd3 [("source", Place "r" "base_pointer"), ("offset", Place "i" (Text.pack (show (localSize + placeInteger target + 2)))), ("dest", dest)] []
+    "l" -> Instr IAdd3 [("source", Place "r" "base_pointer"), ("offset", Place "i" (Text.pack (show (placeInteger target + 1)))), ("dest", dest)] []
+    "pr" -> Instr IMov [("source", target), ("dest", dest)] []
+    _ -> Instr INop [] []

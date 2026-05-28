@@ -2,3 +2,5 @@
 /*.asm
 /*.exe
 /examples/usapop/
+/dist-newstyle/
+*.bin

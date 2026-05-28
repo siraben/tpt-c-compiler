@@ -7,7 +7,7 @@
 %define return_addr_reg r27
 
 ; Initialization and defining basic macros
-%define term_base 0x9F80
+%define term_base 40832
 %define term_height 8
 %define term_width 12
  
@@ -79,60 +79,56 @@ __tptcc_fn___scan_signed_int:
 	push r2
 	push r3
 	push r4
-	push r5
-	mov r2, 0
-	mov r3, 1
+	mov r1, 0
 	call __tptcc_fn_getchar
-	mov r3, return_reg
-	mov r1, r3
-	cmp r3, '-'
+	mov r2, return_reg
+	cmp return_reg, 45
 	je .label_1
+.ssa_bb_1:
 	jmp .label_0
-	.label_1:
+.label_1:
 	mov r3, 65535
 	jmp .label_2
-	.label_0:
+.label_0:
+	mov r1, r2
+	sub r1, 48
 	mov r3, 1
-	mov r2, r1
-	sub r2, '0'
-	.label_2:
-	mov r22, r1
+.label_2:
+	mov r22, r2
 	call __tptcc_fn_putchar
-	.label_3:
+.label_3:
 	call __tptcc_fn_getchar
 	mov r4, return_reg
-	mov r1, r4
-	cmp r4, '0'
+	cmp return_reg, 48
 	jge .label_6
+.ssa_bb_6:
 	jmp .label_4
-	.label_6:
-	mov r4, r1
-	cmp r4, '9'
+.label_6:
+	cmp r4, 57
 	jle .label_5
+.ssa_bb_8:
 	jmp .label_4
-	.label_5:
-	mov r22, r1
+.label_5:
+	mov r22, r4
 	call __tptcc_fn_putchar
-	mull r2, 10
-	sub r1, '0'
-	add r2, r1
+	mull r1, 10
+	mov r2, r4
+	sub r2, 48
+	add r1, r2
 	jmp .label_3
-	.label_4:
+.label_4:
 	cmp r3, 65535
 	je .label_8
+.ssa_bb_11:
 	jmp .label_7
-	.label_8:
-	xor r2, 65535
-	add r2, 1
-	jmp .label_9
-	.label_7:
-	.label_9:
-	ld r3, base_pointer, 2
-	st r2, r3
-	mov return_reg, r1
-	jmp .exit___scan_signed_int
+.label_8:
+	xor r1, 65535
+	add r1, 1
+.label_7:
+	ld r2, base_pointer, 2
+	st r1, r2
+	mov return_reg, r4
 .exit___scan_signed_int:
-	pop r5
 	pop r4
 	pop r3
 	pop r2
@@ -145,33 +141,29 @@ __tptcc_fn___scan_char_array:
 	push r1
 	push r2
 	push r3
-	push r4
-	ld r2, base_pointer, 2
-	.label_10:
+	ld r1, base_pointer, 2
+.label_10:
 	call __tptcc_fn_getchar
-	mov r3, return_reg
-	mov r1, r3
-	cmp r3, 10
+	mov r2, return_reg
+	cmp return_reg, 10
 	jne .label_12
+.ssa_bb_2:
 	jmp .label_11
-	.label_12:
-	mov r22, r1
+.label_12:
+	mov r22, r2
 	call __tptcc_fn_putchar
-	mov r3, r2
-	add r2, 1
-	st r1, r3
+	mov r3, r1
+	add r3, 1
+	st r2, r1
+	mov r1, r3
 	jmp .label_10
-	.label_11:
-	mov r1, r2
-	mov r3, 0
-	st r3, r1
-	mov r1, r2
+.label_11:
+	mov r2, 0
+	st r2, r1
 	ld r2, base_pointer, 2
 	sub r1, r2
 	mov return_reg, r1
-	jmp .exit___scan_char_array
 .exit___scan_char_array:
-	pop r4
 	pop r3
 	pop r2
 	pop r1
@@ -180,49 +172,46 @@ __tptcc_fn___scan_char_array:
 __tptcc_fn_move_cursor:
 	push base_pointer
 	mov base_pointer, stack_pointer
-	push r1
 	push r2
-	push r3
+	push r1
 	mov r23, 0
 	mov r22, 0
 	call __tptcc_fn_set_cursor
-	mov r1, 0
-	.label_13:
-	mov r2, r1
-	ld r3, base_pointer, 3
-	cmp r2, r3
+	mov r2, 0
+.label_13:
+	ld r1, base_pointer, 3
+	cmp r2, r1
 	jl .label_16
+.ssa_bb_2:
 	jmp .label_15
-	.label_16:
+.label_16:
 	mov r22, 10
 	call __tptcc_fn_putchar
-	.label_14:
-	add r1, 1
+.label_14:
+	add r2, 1
 	jmp .label_13
-	.label_15:
-	mov r1, 0
-	.label_17:
-	mov r2, r1
-	ld r3, base_pointer, 2
-	cmp r2, r3
+.label_15:
+	mov r2, 0
+.label_17:
+	ld r1, base_pointer, 2
+	cmp r2, r1
 	jl .label_20
-	jmp .label_19
-	.label_20:
-	mov r22, ' '
+.ssa_bb_7:
+	jmp .exit_move_cursor
+.label_20:
+	mov r22, 32
 	call __tptcc_fn_putchar
-	.label_18:
+.label_18:
+	mov r1, r2
 	add r1, 1
+	mov r2, r1
 	jmp .label_17
-	.label_19:
 .exit_move_cursor:
-	pop r3
-	pop r2
 	pop r1
+	pop r2
 	pop base_pointer
 	ret
 __tptcc_fn_clear_screen:
-	push base_pointer
-	mov base_pointer, stack_pointer
 	push r1
 	mov r23, 0
 	mov r22, 0
@@ -232,23 +221,11 @@ __tptcc_fn_clear_screen:
 	call __tptcc_fn_print_char_array
 .exit_clear_screen:
 	pop r1
-	pop base_pointer
 	ret
 __tptcc_fn_main:
 	sub stack_pointer, 11
 	push base_pointer
 	mov base_pointer, stack_pointer
-	push r1
-	push r2
-	push r3
-	push r4
-	push r5
-	push r6
-	push r7
-	push r8
-	push r9
-	push r10
-	push r11
 	mov r1, 7062
 	mov r22, r1
 	call __tptcc_fn_print_char_array
@@ -256,432 +233,440 @@ __tptcc_fn_main:
 	push r1
 	call __tptcc_fn___scan_signed_int
 	add stack_pointer, 1
-	mov r1, return_reg
-	ld r1, base_pointer, 1
-	mov r2, r1
-	shl r2, 5
-	xor r1, r2
-	mov r2, 313
-	mull r1, r2
-	mov r2, r1
-	shr r2, 3
-	xor r1, r2
-	mov r2, 1023
-	and r1, r2
-	call __tptcc_fn_clear_screen
-	mov r2, 1
-	mull r1, 5
-	add r2, r1
+	ld r2, base_pointer, 1
 	mov r1, r2
-	mov r2, r1
+	shl r1, 5
+	xor r2, r1
+	mull r2, 313
+	mov r1, r2
+	shr r1, 3
+	xor r2, r1
+	and r2, 1023
+	call __tptcc_fn_clear_screen
+	mov r1, 1
+	mull r2, 5
+	add r1, r2
 	mov r2, 7036
 	ld r3, r1, 0
-	sub r3, 'a'
+	sub r3, 97
 	add r2, r3
 	mov r3, 1
 	st r3, r2
 	mov r2, 7036
 	ld r3, r1, 1
-	sub r3, 'a'
+	sub r3, 97
 	add r2, r3
 	mov r3, 1
 	st r3, r2
 	mov r2, 7036
 	ld r3, r1, 2
-	sub r3, 'a'
+	sub r3, 97
 	add r2, r3
 	mov r3, 1
 	st r3, r2
 	mov r2, 7036
 	ld r3, r1, 3
-	sub r3, 'a'
+	sub r3, 97
 	add r2, r3
 	mov r3, 1
 	st r3, r2
 	mov r2, 7036
 	ld r3, r1, 4
-	sub r3, 'a'
+	sub r3, 97
 	add r2, r3
 	mov r3, 1
 	st r3, r2
 	mov r2, 7105
 	mov r22, r2
 	call __tptcc_fn_print_char_array
-	mov r2, 0
-	mov r3, 1
-	.label_21:
-	mov r4, r3
-	cmp r4, 6
+	mov r5, 1
+	mov r4, 0
+	mov r3, r1
+.label_21:
+	cmp r5, 6
 	jl .label_25
+.ssa_bb_2:
+	mov r7, r3
 	jmp .label_23
-	.label_25:
-	mov r4, r2
+.label_25:
 	cmp r4, 0
 	je .label_26
-	mov r4, 0
+.ssa_bb_4:
+	mov r1, 0
 	jmp .label_27
-	.label_26:
-	mov r4, 1
-	.label_27:
-	cmp r4, 0
-	je .label_23
-	.label_24:
-	mov r22, ' '
+.label_26:
+	mov r1, 1
+.label_27:
+	cmp r1, 0
+	je .ssa_phi__label_27__label_23
+	jmp .ssa_bb_7
+.ssa_phi__label_27__label_23:
+	mov r7, r3
+	jmp .label_23
+.ssa_bb_7:
+	mov r22, 32
 	call __tptcc_fn_putchar
-	mov r22, ' '
+	mov r22, 32
 	call __tptcc_fn_putchar
-	mov r22, ' '
+	mov r22, 32
 	call __tptcc_fn_putchar
-	add r4, base_pointer, 2
+	add r1, base_pointer, 2
 	call __tptcc_fn_getchar
-	mov r5, return_reg
-	st r5, r4
-	ld r4, base_pointer, 2
-	sub r4, 'a'
-	add r5, base_pointer, 2
-	ld r22, r5
+	st return_reg, r1
+	ld r1, base_pointer, 2
+	sub r1, 97
+	add r2, base_pointer, 2
+	ld r22, r2
 	call __tptcc_fn_putchar
-	mov r5, 6912
-	ld r5, r5, r4
-	mov r6, 6912
-	add r4, 1
-	add r6, r4
-	ld r4, r6
-	sub r4, 1
-	add r6, base_pointer, 3
+	mov r2, 6912
+	add r2, r1
+	ld r6, r2
+	mov r2, 6912
+	add r1, 1
+	add r2, r1
+	ld r1, r2
+	mov r7, r1
+	sub r7, 1
+	add r1, base_pointer, 3
 	call __tptcc_fn_getchar
-	mov r7, return_reg
-	st r7, r6
-	add r6, base_pointer, 3
-	ld r22, r6
+	st return_reg, r1
+	add r1, base_pointer, 3
+	ld r22, r1
 	call __tptcc_fn_putchar
-	mov r6, r5
-	add r6, r4
-	shr r6, 1
-	mov r7, 1
-	mov r8, r6
-	mull r8, 5
-	add r8, 1
-	ld r7, r7, r8
-	add r8, base_pointer, 2
-	ld r8, r8, 1
-	cmp r8, r7
+	mov r1, r6
+	add r1, r7
+	mov r8, r1
+	shr r8, 1
+	mov r1, 1
+	mov r2, r8
+	mull r2, 5
+	add r2, 1
+	add r1, r2
+	ld r2, r1
+	add r1, base_pointer, 2
+	ld r1, r1, 1
+	cmp r1, r2
 	jg .label_29
+.ssa_bb_9:
 	jmp .label_28
-	.label_29:
-	mov r5, r6
-	add r5, 1
-	jmp .label_30
-	.label_28:
-	add r8, base_pointer, 2
-	ld r8, r8, 1
-	cmp r8, r7
-	jl .label_32
-	jmp .label_31
-	.label_32:
-	mov r4, r6
-	sub r4, 1
+.label_29:
+	mov r1, r8
+	add r1, 1
+	mov r2, r7
+	mov r6, r1
 	jmp .label_33
-	.label_31:
-	.label_33:
-	.label_30:
-	add r6, base_pointer, 4
-	push r6
+.label_28:
+	add r1, base_pointer, 2
+	ld r1, r1, 1
+	cmp r1, r2
+	jl .label_32
+.ssa_bb_12:
+	jmp .label_31
+.label_32:
+	mov r1, r8
+	sub r1, 1
+	mov r2, r1
+	jmp .label_33
+.label_31:
+	mov r2, r7
+.label_33:
+	add r1, base_pointer, 4
+	push r1
 	call __tptcc_fn___scan_char_array
 	add stack_pointer, 1
-	mov r6, return_reg
-	.label_34:
-	mov r6, r5
-	cmp r6, r4
+	mov r11, r2
+	mov r10, r6
+	mov r9, r5
+	mov r8, r4
+	mov r7, r3
+.label_34:
+	cmp r10, r11
 	jle .label_36
+.ssa_bb_18:
 	jmp .label_35
-	.label_36:
-	mov r7, 0
-	mov r6, r5
-	add r6, r4
-	shr r6, 1
-	mov r8, r6
-	mull r8, 5
-	add r9, base_pointer, 2
-	ld r9, r9, 1
-	mov r10, 1
-	mov r11, r8
-	add r11, 1
-	ld r10, r10, r11
-	cmp r9, r10
-	jne .label_38
-	jmp .label_37
-	.label_38:
-	add r7, base_pointer, 2
-	ld r7, r7, 1
-	mov r9, 1
-	add r8, 1
-	add r9, r8
-	ld r8, r9
-	sub r7, r8
-	jmp .label_39
-	.label_37:
-	add r9, base_pointer, 2
-	ld r9, r9, 2
-	mov r10, 1
-	mov r11, r8
-	add r11, 2
-	ld r10, r10, r11
-	cmp r9, r10
-	jne .label_41
-	jmp .label_40
-	.label_41:
-	add r7, base_pointer, 2
-	ld r7, r7, 2
-	mov r9, 1
-	add r8, 2
-	add r9, r8
-	ld r8, r9
-	sub r7, r8
-	jmp .label_42
-	.label_40:
-	add r9, base_pointer, 2
-	ld r9, r9, 3
-	mov r10, 1
-	mov r11, r8
-	add r11, 3
-	ld r10, r10, r11
-	cmp r9, r10
-	jne .label_44
-	jmp .label_43
-	.label_44:
-	add r7, base_pointer, 2
-	ld r7, r7, 3
-	mov r9, 1
-	add r8, 3
-	add r9, r8
-	ld r8, r9
-	sub r7, r8
-	jmp .label_45
-	.label_43:
-	add r9, base_pointer, 2
-	ld r9, r9, 4
-	mov r10, 1
-	mov r11, r8
-	add r11, 4
-	ld r10, r10, r11
-	cmp r9, r10
-	jne .label_47
-	jmp .label_46
-	.label_47:
-	add r7, base_pointer, 2
-	ld r7, r7, 4
-	mov r9, 1
-	add r8, 4
-	add r9, r8
-	ld r8, r9
-	sub r7, r8
-	jmp .label_48
-	.label_46:
-	.label_48:
-	.label_45:
-	.label_42:
-	.label_39:
-	mov r8, r7
-	cmp r8, 0
-	je .label_50
-	jmp .label_49
-	.label_50:
-	jmp .label_35
-	jmp .label_51
-	.label_49:
-	cmp r7, 0
-	jl .label_53
-	jmp .label_52
-	.label_53:
-	mov r4, r6
-	sub r4, 1
-	jmp .label_54
-	.label_52:
-	mov r5, r6
-	add r5, 1
-	.label_54:
-	.label_51:
-	jmp .label_34
-	.label_35:
-	cmp r5, r4
-	jg .label_59
-	jmp .label_58
-	.label_59:
+.label_36:
+	mov r6, 0
+	mov r1, r10
+	add r1, r11
+	shr r1, 1
+	mov r2, r1
+	mull r2, 5
+	add r3, base_pointer, 2
+	ld r3, r3, 1
 	mov r4, 1
-	jmp .label_60
-	.label_58:
-	mov r4, 0
-	.label_60:
-	cmp r4, 0
-	je .label_55
-	.label_56:
-	push r3
-	mov r4, 3
-	push r4
+	mov r5, r2
+	add r5, 1
+	ld r4, r4, r5
+	cmp r3, r4
+	jne .label_38
+.ssa_bb_20:
+	jmp .label_37
+.label_38:
+	add r3, base_pointer, 2
+	ld r3, r3, 1
+	mov r4, 1
+	add r2, 1
+	add r4, r2
+	ld r2, r4
+	sub r3, r2
+	jmp .label_48
+.label_37:
+	add r3, base_pointer, 2
+	ld r3, r3, 2
+	mov r4, 1
+	mov r5, r2
+	add r5, 2
+	ld r4, r4, r5
+	cmp r3, r4
+	jne .label_41
+.ssa_bb_23:
+	jmp .label_40
+.label_41:
+	add r3, base_pointer, 2
+	ld r3, r3, 2
+	mov r4, 1
+	add r2, 2
+	add r4, r2
+	ld r2, r4
+	sub r3, r2
+	jmp .label_48
+.label_40:
+	add r3, base_pointer, 2
+	ld r3, r3, 3
+	mov r4, 1
+	mov r5, r2
+	add r5, 3
+	ld r4, r4, r5
+	cmp r3, r4
+	jne .label_44
+.ssa_bb_26:
+	jmp .label_43
+.label_44:
+	add r3, base_pointer, 2
+	ld r3, r3, 3
+	mov r4, 1
+	add r2, 3
+	add r4, r2
+	ld r2, r4
+	sub r3, r2
+	jmp .label_48
+.label_43:
+	add r3, base_pointer, 2
+	ld r3, r3, 4
+	mov r4, 1
+	mov r5, r2
+	add r5, 4
+	ld r4, r4, r5
+	cmp r3, r4
+	jne .label_47
+.ssa_bb_29:
+	jmp .label_46
+.label_47:
+	add r3, base_pointer, 2
+	ld r3, r3, 4
+	mov r4, 1
+	add r2, 4
+	add r4, r2
+	ld r2, r4
+	sub r3, r2
+	jmp .label_48
+.label_46:
+	mov r3, r6
+.label_48:
+	cmp r3, 0
+	je .label_50
+.ssa_bb_36:
+	jmp .label_49
+.label_50:
+	jmp .label_35
+.ssa_bb_38:
+	mov r11, 0
+	mov r10, 0
+	mov r9, 0
+	mov r8, 0
+	mov r7, 0
+	jmp .label_51
+.label_49:
+	cmp r3, 0
+	jl .label_53
+.ssa_bb_40:
+	jmp .label_52
+.label_53:
+	sub r1, 1
+	mov r11, r1
+	mov r1, r10
+	jmp .label_54
+.label_52:
+	add r1, 1
+.label_54:
+	mov r10, r1
+.label_51:
+	jmp .label_34
+.label_35:
+	cmp r10, r11
+	jg .label_56
+.ssa_bb_46:
+	jmp .label_55
+.label_56:
+	push r9
+	mov r1, 3
+	push r1
 	call __tptcc_fn_move_cursor
 	add stack_pointer, 2
-	mov r4, 7119
-	mov r22, r4
+	mov r1, 7119
+	mov r22, r1
 	call __tptcc_fn_print_char_array
-	mov r4, r3
-	add r4, 1
-	push r4
-	mov r4, 0
-	push r4
+	mov r1, r9
+	add r1, 1
+	push r1
+	mov r1, 0
+	push r1
 	call __tptcc_fn_move_cursor
 	add stack_pointer, 2
+	mov r4, r8
+	mov r3, r7
 	jmp .label_57
-	.label_55:
-	push r3
-	mov r4, 3
-	push r4
+.label_55:
+	push r9
+	mov r1, 3
+	push r1
 	call __tptcc_fn_move_cursor
 	add stack_pointer, 2
 	mov r4, 0
-	mov r5, 0
-	.label_61:
-	mov r6, r5
-	cmp r6, 5
-	jl .label_64
-	jmp .label_63
-	.label_64:
-	ld r6, r1, r5
-	add r7, base_pointer, 2
-	ld r7, r7, r5
-	cmp r6, r7
-	je .label_66
-	jmp .label_65
-	.label_66:
-	add r4, 1
+	mov r3, 0
+.label_58:
+	cmp r4, 5
+	jl .label_61
+.ssa_bb_50:
+	jmp .label_60
+.label_61:
+	ld r1, r7, r4
+	add r2, base_pointer, 2
+	ld r2, r2, r4
+	cmp r1, r2
+	je .label_63
+.ssa_bb_52:
+	jmp .label_62
+.label_63:
+	add r3, 1
 	mov r22, 10
 	call __tptcc_fn_set_text_colour
 	jmp .label_67
-	.label_65:
-	mov r6, 7036
-	add r7, base_pointer, 2
-	ld r7, r7, r5
-	sub r7, 'a'
-	ld r6, r6, r7
-	cmp r6, 0
-	je .label_68
-	.label_69:
+.label_62:
+	mov r1, 7036
+	add r2, base_pointer, 2
+	ld r2, r2, r4
+	sub r2, 97
+	ld r1, r1, r2
+	cmp r1, 0
+	je .label_65
+.ssa_bb_55:
 	mov r22, 14
 	call __tptcc_fn_set_text_colour
-	jmp .label_70
-	.label_68:
+	jmp .label_67
+.label_65:
 	mov r22, 7
 	call __tptcc_fn_set_text_colour
-	.label_70:
-	.label_67:
-	add r6, base_pointer, 2
-	add r6, r5
-	ld r22, r6
+.label_67:
+	add r1, base_pointer, 2
+	add r1, r4
+	ld r22, r1
 	call __tptcc_fn_putchar
-	.label_62:
-	add r5, 1
-	jmp .label_61
-	.label_63:
+.label_59:
+	add r4, 1
+	jmp .label_58
+.label_60:
 	mov r22, 15
 	call __tptcc_fn_set_text_colour
 	mov r22, 10
 	call __tptcc_fn_putchar
-	cmp r4, 5
-	je .label_72
-	jmp .label_71
-	.label_72:
-	mov r2, 7125
-	mov r22, r2
-	call __tptcc_fn_print_char_array
-	mov r2, 1
-	jmp .label_23
-	jmp .label_73
-	.label_71:
-	.label_73:
-	.label_57:
-	.label_22:
-	add r3, 1
-	jmp .label_21
-	.label_23:
-	cmp r2, 0
-	je .label_77
-	mov r2, 0
-	jmp .label_78
-	.label_77:
-	mov r2, 1
-	.label_78:
-	cmp r2, 0
-	je .label_74
-	.label_75:
-	mov r2, 7134
-	mov r22, r2
-	call __tptcc_fn_print_char_array
-	add r2, r1, 5
-	mov r3, 0
-	st r3, r2
+	cmp r3, 5
+	je .label_69
+.ssa_bb_62:
+	jmp .label_68
+.label_69:
+	mov r1, 7125
 	mov r22, r1
 	call __tptcc_fn_print_char_array
-	jmp .label_76
-	.label_74:
-	.label_76:
+	mov r4, 1
+	jmp .label_23
+.ssa_bb_64:
+	mov r9, 0
+	mov r8, 0
+	mov r7, 0
+.label_68:
+	mov r4, r8
+	mov r3, r7
+.label_57:
+	mov r5, r9
+	add r5, 1
+	jmp .label_21
+.label_23:
+	cmp r4, 0
+	je .label_74
+.ssa_bb_70:
+	mov r1, 0
+	jmp .label_75
+.label_74:
+	mov r1, 1
+.label_75:
+	cmp r1, 0
+	je .exit_main
+.ssa_bb_73:
+	mov r1, 7134
+	mov r22, r1
+	call __tptcc_fn_print_char_array
+	add r1, r7, 5
+	mov r2, 0
+	st r2, r1
+	mov r22, r7
+	call __tptcc_fn_print_char_array
 .exit_main:
-	pop r11
-	pop r10
-	pop r9
-	pop r8
-	pop r7
-	pop r6
-	pop r5
-	pop r4
-	pop r3
-	pop r2
-	pop r1
 	pop base_pointer
 	add stack_pointer, 11
 	hlt
-__tptcc_fn_print_unsigned_int:
-	test r22, r22
-	jnz .__print_unsigned_int_not_zero
-	mov r22, '0'
-	st r22, term_print
-	jmp .__print_unsigned_int_exit
-.__print_unsigned_int_not_zero:
-	mov r23, 4		; p = 4
-.__print_unsigned_int_fixed_point:
-	mulh r24, r22, 52429	; q = (n * 52429) >> 16
-	shr r24, 3		; q >>= 3
-	mul r25, r24, 10		; d*q
-	sub r22, r25		; remainder = n - d*q
-	st r22, r23, .__print_unsigned_int_buf		
-	sub r23, 1		; p--;
-	movf r22, r24		; n = q
-	jnz .__print_unsigned_int_fixed_point
-
-	add r23, 1
-.__print_unsigned_int_print_int:
-	ld r22, r23, .__print_unsigned_int_buf
-	add r22, '0'
-	st r22, term_reg, term_base
-	add r23, 1
-	cmp r23, 5
-	jne .__print_unsigned_int_print_int
-	
-.__print_unsigned_int_exit:
-	ret
-.__print_unsigned_int_buf:
-	dw 0, 0, 0, 0, 0
-
-__tptcc_fn_print_signed_int:
-    cmp r22, 0
-    jge .__print_signed_int_not_negative
-    mov r23, '-'
-    st r23, term_reg, term_base
-	xor r22, 65535
-    add r22, 1
-.__print_signed_int_not_negative:
-    call __tptcc_fn_print_unsigned_int
+__tptcc_fn_getchar:
+    ld return_reg, term_input
+    test return_reg, return_reg
+    jz __tptcc_fn_getchar
     ret
-    
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_getchar:
+    ld return_reg, term_input
+    test return_reg, return_reg
+    jz __tptcc_fn_getchar
+    ret
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_getchar:
+    ld return_reg, term_input
+    test return_reg, return_reg
+    jz __tptcc_fn_getchar
+    ret
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_set_cursor:
+    ; r22 = row, r23 = column
+    shl r22, 5
+    add r22, r23
+    st r22, term_cursor
+    ret
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_set_cursor:
+    ; r22 = row, r23 = column
+    shl r22, 5
+    add r22, r23
+    st r22, term_cursor
+    ret
 __tptcc_fn_print_char_array:
     ld r23, r22
     test r23, r23
@@ -691,91 +676,100 @@ __tptcc_fn_print_char_array:
     jmp __tptcc_fn_print_char_array
 .__print_char_array_exit:
     ret
-
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
+    ret
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
+    ret
 __tptcc_fn_putchar:
     st r22, term_reg, term_base
     ret
-
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
 __tptcc_fn_getchar:
     ld return_reg, term_input
     test return_reg, return_reg
     jz __tptcc_fn_getchar
     ret
-
-__tptcc_fn_getchar_nb:
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
+    ret
+__tptcc_fn_getchar:
     ld return_reg, term_input
+    test return_reg, return_reg
+    jz __tptcc_fn_getchar
     ret
-
-__tptcc_fn_set_colour:
-    ; r22 = background, r23 = foreground
-    shl r22, 4
-    add r22, r23
-    st r22, term_colour
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
     ret
-
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
+    ret
 __tptcc_fn_set_text_colour:
     st r22, term_colour
     ret
-
-__tptcc_fn_send_raw:
-    st r22, r23
+__tptcc_fn_set_text_colour:
+    st r22, term_colour
     ret
-
-__tptcc_fn_set_zero_char:
-    exh r23, r0, r23
-    mov r22, r23, r22
-    st r22, term_print_e
-    exh r25, r0, r25
-    mov r24, r25, r24
-    st r24, term_print_o
+__tptcc_fn_set_text_colour:
+    st r22, term_colour
     ret
-
-
-__tptcc_fn_set_cursor:
-    ; r22 = row, r23 = column
-    shl r22, 5
-    add r22, r23
-    st r22, term_cursor
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
     ret
-
-__tptcc_fn_scan_unsigned_int:
-    mov r23, 0
-__scan_unsigned_int_loop:
-    call __tptcc_fn_getchar
-    st return_reg, term_reg, term_base
-    sub return_reg, '0'
-    cmp return_reg, 9
-    jg __scan_unsigned_int_not_digit
-    cmp return_reg, 0
-    jl __scan_unsigned_int_not_digit
-    mull r23, 10
-    add r23, return_reg
-    jmp __scan_unsigned_int_loop
-__scan_unsigned_int_not_digit:
-    st r23, r22
+__tptcc_fn_set_text_colour:
+    st r22, term_colour
     ret
-
-__tptcc_fn_vscroll:
-    mov r22, ' '
-    st r22, term_raw
+__tptcc_fn_putchar:
+    st r22, term_reg, term_base
     ret
-
-__tptcc_fn_hscroll:
-    mov r22, ' '
-    st r22, term_base
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
     ret
-
-__tptcc_fn_set_terminal_mode:
-    mov term_reg, r22
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
     ret
-
-__tptcc_fn_get_terminal_mode:
-    mov return_reg, term_reg
-    ret
-
-__tptcc_fn_plot:
-    ; r22 = column/x, r23 = row/y, r24 = colour
-    shl r23, 8
-    add r23, r22
-    st r23, r24, term_plot
+__tptcc_fn_print_char_array:
+    ld r23, r22
+    test r23, r23
+    jz .__print_char_array_exit
+    st r23, term_reg, term_base
+    add r22, 1
+    jmp __tptcc_fn_print_char_array
+.__print_char_array_exit:
     ret
