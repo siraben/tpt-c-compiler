@@ -12,80 +12,23 @@ import Control.Monad (foldM, forM, forM_, unless, void, when)
 import Data.Foldable (for_, toList)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
-import Data.Sequence (Seq, (><), (|>))
+import Data.Sequence ((><), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Effectful
 import qualified Effectful.Error.Static as Error
-import Effectful.State.Static.Local (State)
 import qualified Effectful.State.Static.Local as State
 
 import Tptcc.Ast
 import Tptcc.CType (CType (..), Member (..), TypeKind (..), array, base, baseFromSpecifiers, baseWithSigned, enum, function, integerPromotion, isBaseSpecifiers, memberByName, pointer, sizeof, struct, union, usualArithmeticConversion, variadicFunction, withMemberOffsets)
 import Tptcc.NodeFields
+import Tptcc.NodeFields.Effectful
 import Tptcc.Operand (Operand (..), OperandValue (..))
+import Tptcc.IRSimpleTac.Types
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Tac hiding (fieldString)
 import Tptcc.Token (SourcePos (..), Token (..))
-
-data LocalInfo = LocalInfo
-  { localInfoPlace :: Place
-  , localInfoPointerLevel :: Integer
-  , localInfoDimensions :: [Integer]
-  , localInfoPointerToArray :: Bool
-  , localInfoType :: CType
-  }
-  deriving (Eq, Show)
-
-data PostfixContext = PostfixContext
-  { contextPointerLevel :: Integer
-  , contextDimensions :: [Integer]
-  , contextPointerToArray :: Bool
-  , contextType :: Maybe CType
-  }
-  deriving (Eq, Show)
-
-data CaseContext = CaseContext
-  { caseEntries :: [(Place, Place)]
-  , caseDefault :: Maybe Place
-  }
-  deriving (Eq, Show)
-
-data FunctionContext = FunctionContext
-  { contextMethodName :: Text
-  , contextLocalOffset :: Integer
-  , contextLocals :: Map.Map Text LocalInfo
-  , contextInstructions :: Seq Instr
-  , contextLoopLabels :: [(Place, Place)]
-  , contextCaseLabels :: [CaseContext]
-  }
-  deriving (Eq, Show)
-
-data TacState = TacState
-  { localOffset :: Integer
-  , globalOffset :: Integer
-  , tempCounter :: Integer
-  , labelCounter :: Integer
-  , loopLabels :: [(Place, Place)]
-  , caseLabels :: [CaseContext]
-  , currentMethodName :: Text
-  , functionPlaces :: Map.Map Text Place
-  , functionReturns :: Map.Map Text Bool
-  , enumConstants :: Map.Map Text Place
-  , typeTags :: Map.Map Text CType
-  , globals :: Map.Map Text LocalInfo
-  , locals :: Map.Map Text LocalInfo
-  , instructions :: Seq Instr
-  , methods :: [MethodOutput]
-  , breakpoints :: [Integer]
-  , breakpointIndex :: Int
-  }
-  deriving (Eq, Show)
-
-type TacM = Eff TacEffects
-
-type TacEffects = '[State TacState, Error.Error String]
 
 dumpSimpleTac :: Node -> Either String [String]
 dumpSimpleTac ast = do
@@ -1374,11 +1317,11 @@ popCaseLabels = do
       pure context {caseEntries = reverse (caseEntries context)}
     [] -> throw "case label stack underflow"
 
-emit :: InstrType -> [(Text, Place)] -> TacM ()
+emit :: InstrType -> [(InstrFieldName, Place)] -> TacM ()
 emit ty fields =
   State.modify (\st -> st {instructions = instructions st |> Instr ty fields []})
 
-emitString :: InstrType -> [(Text, Text)] -> TacM ()
+emitString :: InstrType -> [(InstrFieldName, Text)] -> TacM ()
 emitString ty fields =
   State.modify (\st -> st {instructions = instructions st |> Instr ty [] fields})
 
@@ -1408,11 +1351,11 @@ renderInstr :: Int -> Instr -> String
 renderInstr index instr =
   show index <> "\t" <> Text.unpack (instrMnemonic (instrType instr)) <> concatMap renderField (instrFields instr) <> concatMap renderStringField (instrStringFields instr)
 
-renderField :: (Text, Place) -> String
-renderField (name, place) = "\t" <> Text.unpack name <> "=" <> Text.unpack (renderPlace place)
+renderField :: (InstrFieldName, Place) -> String
+renderField (name, place) = "\t" <> Text.unpack (instrFieldNameText name) <> "=" <> Text.unpack (renderPlace place)
 
-renderStringField :: (Text, Text) -> String
-renderStringField (name, value) = "\t" <> Text.unpack name <> "=" <> Text.unpack value
+renderStringField :: (InstrFieldName, Text) -> String
+renderStringField (name, value) = "\t" <> Text.unpack (instrFieldNameText name) <> "=" <> Text.unpack value
 
 lookupLocal :: Text -> TacM Place
 lookupLocal name = do
@@ -1898,18 +1841,6 @@ firstExpressionChild node =
         [] -> throw "empty expression"
     _ -> pure node
 
-fieldNode :: Text -> Node -> TacM Node
-fieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> pure child
-    _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
-
-fieldNodeList :: Text -> Node -> TacM [Node]
-fieldNodeList name node =
-  case lookupField name node of
-    Just (NodeList children) -> pure children
-    _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
-
 parameterPlaces :: Node -> TacM [(Text, LocalInfo)]
 parameterPlaces declarator = do
   direct <- fieldNode "direct_declarator" declarator
@@ -1927,22 +1858,12 @@ parameterPlaces declarator = do
                   pure [(declaratorName paramDeclarator, LocalInfo (Place "p" (Text.pack (show index))) (declaratorPointerLevel paramDeclarator) [] (declaratorPointerToArray paramDeclarator) declaredTy)]
             _ -> pure []
 
-fieldString :: Text -> Node -> TacM Text
-fieldString name node =
-  case lookupField name node of
-    Just (StringValue value) -> pure value
-    _ -> throw ("missing string field '" <> name <> "' on " <> nodeName node)
-
 characterValue :: Node -> Text
 characterValue node =
   case lookupField "value" node of
     Just (StringValue value) -> value
     Just (IntValue value) -> Text.pack (show value)
     _ -> "0"
-
-declaratorName :: Node -> Text
-declaratorName declarator =
-  maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
 functionDeclarationReturnsValue :: Node -> Bool
 functionDeclarationReturnsValue declaration =

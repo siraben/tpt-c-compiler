@@ -14,43 +14,17 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Effectful
 import qualified Effectful.Error.Static as Error
-import Effectful.State.Static.Local (State)
 import qualified Effectful.State.Static.Local as State
-import Effectful.Writer.Static.Local (Writer)
 import qualified Effectful.Writer.Static.Local as Writer
 
 import Tptcc.Ast
 import Tptcc.CType
 import Tptcc.NodeFields
+import Tptcc.NodeFields.Effectful
 import Tptcc.Operand (Operand (..))
-import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
+import Tptcc.SymbolTable (Symbol (..))
 import Tptcc.Token (SourcePos (..), tokenName)
-
-data Namespace = Ordinary | Tag
-  deriving stock (Eq, Show)
-
-data ScopeFrame = ScopeFrame
-  { frameLevel :: Int
-  , frameName :: Text
-  , frameOrdinary :: Map.Map Text Symbol
-  , frameTags :: Map.Map Text Symbol
-  }
-  deriving stock (Eq, Show)
-
-data TypeState = TypeState
-  { scopeStack :: NonEmpty ScopeFrame
-  , typedNodes :: Map.Map TypeKey CType
-  , blockCounter :: Integer
-  , includedStandardFunctionNames :: Set.Set Text
-  }
-  deriving stock (Eq, Show)
-
-type TypeM = Eff TypeEffects
-
-type TypeEffects = '[State TypeState, Writer (Endo [String]), Error.Error String]
-
-data TypeKey = TypeKey NodeKind Int Int
-  deriving stock (Eq, Ord, Show)
+import Tptcc.TypeChecker.Types
 
 typeEvents :: Node -> Either String [String]
 typeEvents ast = do
@@ -67,22 +41,6 @@ runTypeCheck ast =
   case runPureEff (Error.runErrorNoCallStack (Writer.runWriter (State.runState initialState (checkProgram ast)))) of
     Left err -> Left err
     Right ((_, st), logLines) -> Right (st, appEndo logLines [])
-
-initialState :: TypeState
-initialState =
-  TypeState
-    { scopeStack =
-        ScopeFrame
-          { frameLevel = 0
-          , frameName = "global"
-          , frameOrdinary = Map.fromList defaultSymbols
-          , frameTags = Map.empty
-          }
-          :| []
-    , typedNodes = Map.empty
-    , blockCounter = 0
-    , includedStandardFunctionNames = Set.empty
-    }
 
 checkProgram :: Node -> TypeM ()
 checkProgram program = do
@@ -837,12 +795,6 @@ dereferenceType ty =
     ArrayType _ target -> target
     _ -> ty
 
-fieldString :: Text -> Node -> TypeM Text
-fieldString name node =
-  case lookupField name node of
-    Just (StringValue value) -> pure value
-    _ -> throw ("missing string field '" <> name <> "' on " <> nodeName node)
-
 firstMaybe :: [a] -> Maybe a
 firstMaybe [] = Nothing
 firstMaybe (value : _) = Just value
@@ -968,45 +920,6 @@ appendLog line = Writer.tell (Endo (Text.unpack line :))
 renderNamespace :: Namespace -> Text
 renderNamespace Ordinary = "o"
 renderNamespace Tag = "t"
-
-field :: Text -> Node -> TypeM NodeValue
-field name node =
-  maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
-
-fieldNode :: Text -> Node -> TypeM Node
-fieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> pure child
-    _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
-
-fieldNodeList :: Text -> Node -> TypeM [Node]
-fieldNodeList name node =
-  case lookupField name node of
-    Just (NodeList children) -> pure children
-    _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
-
-fieldInt :: Text -> Node -> TypeM Integer
-fieldInt name node =
-  case lookupField name node of
-    Just (IntValue value) -> pure value
-    _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
-
-fieldInts :: Text -> Node -> TypeM [Integer]
-fieldInts name node =
-  case lookupField name node of
-    Just (IntList values) -> pure values
-    _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
-
-declaratorName :: Node -> Text
-declaratorName declarator =
-  maybe "" identifierValue (fieldNodeMaybe "id" declarator)
-
-storageClassKind :: Node -> Maybe Text
-storageClassKind declarationSpecifier =
-  fieldNodeMaybe "storage_class" declarationSpecifier >>= \storage ->
-    case lookupField "kind" storage of
-      Just (StringValue value) -> Just value
-      _ -> Nothing
 
 requireKind :: NodeKind -> Node -> TypeM ()
 requireKind expected node =

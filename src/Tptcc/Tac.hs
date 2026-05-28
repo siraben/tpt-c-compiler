@@ -1,5 +1,6 @@
 module Tptcc.Tac
   ( Instr (..)
+  , InstrFieldName (..)
   , InstrType (..)
   , MethodOutput (..)
   , Place (..)
@@ -19,6 +20,7 @@ module Tptcc.Tac
   ) where
 
 import Data.Maybe (fromMaybe)
+import Data.String (IsString (..))
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -32,10 +34,24 @@ data Place = Place
 
 data Instr = Instr
   { instrType :: InstrType
-  , instrFields :: [(Text, Place)]
-  , instrStringFields :: [(Text, Text)]
+  , instrFields :: [(InstrFieldName, Place)]
+  , instrStringFields :: [(InstrFieldName, Text)]
   }
   deriving (Eq, Show)
+
+newtype InstrFieldName = InstrFieldName
+  { instrFieldNameText :: Text
+  }
+  deriving stock (Eq, Ord, Show)
+
+instance IsString InstrFieldName where
+  fromString = InstrFieldName . Text.pack
+
+instance Semigroup InstrFieldName where
+  InstrFieldName left <> InstrFieldName right = InstrFieldName (left <> right)
+
+instance Monoid InstrFieldName where
+  mempty = InstrFieldName mempty
 
 data InstrType
   = IAdd
@@ -93,13 +109,13 @@ data TacProgram = TacProgram
   }
   deriving (Eq, Show)
 
-fieldPlace :: Text -> Instr -> Place
+fieldPlace :: InstrFieldName -> Instr -> Place
 fieldPlace name instr =
   case lookup name (instrFields instr) of
     Just place -> place
     Nothing -> Place "i" "0"
 
-fieldString :: Text -> Instr -> Text
+fieldString :: InstrFieldName -> Instr -> Text
 fieldString name instr =
   fromMaybe "" (lookup name (instrStringFields instr))
 

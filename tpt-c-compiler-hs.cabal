@@ -20,17 +20,22 @@ executable tptcc-hs
     Tptcc.CodeGen.Stdlib
     Tptcc.CType
     Tptcc.IRGlobal
+    Tptcc.IRGlobal.Types
     Tptcc.IRSimpleTac
+    Tptcc.IRSimpleTac.Types
     Tptcc.Lexer
     Tptcc.NodeFields
+    Tptcc.NodeFields.Effectful
     Tptcc.Operand
     Tptcc.Parser
+    Tptcc.Parser.Support
     Tptcc.Preprocessor
     Tptcc.SSA
     Tptcc.SymbolTable
     Tptcc.Tac
     Tptcc.Token
     Tptcc.TypeChecker
+    Tptcc.TypeChecker.Types
   build-depends:
     base >=4.16 && <5,
     containers,

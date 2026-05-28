@@ -13,48 +13,18 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Effectful
 import qualified Effectful.Error.Static as Error
-import Effectful.Reader.Static (Reader)
 import qualified Effectful.Reader.Static as Reader
-import Effectful.State.Static.Local (State)
 import qualified Effectful.State.Static.Local as State
-import Effectful.Writer.Static.Local (Writer)
 import qualified Effectful.Writer.Static.Local as Writer
 
 import Tptcc.Ast
 import Tptcc.CType
 import Tptcc.NodeFields
-import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
+import Tptcc.NodeFields.Effectful
+import Tptcc.IRGlobal.Types
+import Tptcc.SymbolTable (defaultSymbols)
 import Tptcc.Tac (Place (..), placeInteger)
 import Tptcc.Token (SourcePos (..))
-
-data Namespace = Ordinary | Tag
-  deriving (Eq, Show)
-
-data IRSymbol = IRSymbol
-  { irSymbolType :: CType
-  , irSymbolPlace :: Maybe Place
-  , irSymbolPrototype :: Bool
-  }
-  deriving (Eq, Show)
-
-data IRState = IRState
-  { ordinarySymbols :: Map.Map Text IRSymbol
-  , tagSymbols :: Map.Map Text IRSymbol
-  , globalOffset :: Integer
-  , globalData :: Map.Map Integer Text
-  , methodLocalSizes :: Map.Map Text Integer
-  }
-  deriving (Eq, Show)
-
-data GlobalInfo = GlobalInfo
-  { globalInfoSize :: Integer
-  , globalInfoData :: Map.Map Integer Text
-  }
-  deriving (Eq, Show)
-
-type IRM = Eff IREffects
-
-type IREffects = '[Reader (Maybe Text), State IRState, Writer (Endo [String]), Error.Error String]
 
 dumpIRGlobals :: Node -> Either String [String]
 dumpIRGlobals ast = do
@@ -75,24 +45,6 @@ runIR action =
   case runPureEff (Error.runErrorNoCallStack (Writer.runWriter (State.runState initialState (Reader.runReader Nothing action)))) of
     Left err -> Left err
     Right ((value, st), events) -> Right (value, st, appEndo events [])
-
-initialState :: IRState
-initialState =
-  IRState
-    { ordinarySymbols = Map.fromList [(name, fromDefault symbol) | (name, symbol) <- defaultSymbols]
-    , tagSymbols = Map.empty
-    , globalOffset = 0
-    , globalData = Map.empty
-    , methodLocalSizes = Map.empty
-    }
-
-fromDefault :: Symbol -> IRSymbol
-fromDefault symbol =
-  IRSymbol
-    { irSymbolType = symbolType symbol
-    , irSymbolPlace = Nothing
-    , irSymbolPrototype = symbolIsPrototype symbol
-    }
 
 emitProgram :: Node -> IRM ()
 emitProgram program = mapM_ emitDeclaration (childNodes program)
@@ -606,38 +558,6 @@ upsertOrdinary name symbol =
 upsertTag :: Text -> IRSymbol -> IRM ()
 upsertTag name symbol =
   State.modify (\st -> st {tagSymbols = Map.insert name symbol (tagSymbols st)})
-
-field :: Text -> Node -> IRM NodeValue
-field name node =
-  maybe (throw ("missing field '" <> name <> "' on " <> nodeName node)) pure (lookupField name node)
-
-fieldNode :: Text -> Node -> IRM Node
-fieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> pure child
-    _ -> throw ("missing node field '" <> name <> "' on " <> nodeName node)
-
-fieldNodeList :: Text -> Node -> IRM [Node]
-fieldNodeList name node =
-  case lookupField name node of
-    Just (NodeList children) -> pure children
-    _ -> throw ("missing node list field '" <> name <> "' on " <> nodeName node)
-
-fieldInt :: Text -> Node -> IRM Integer
-fieldInt name node =
-  case lookupField name node of
-    Just (IntValue value) -> pure value
-    _ -> throw ("missing int field '" <> name <> "' on " <> nodeName node)
-
-fieldInts :: Text -> Node -> IRM [Integer]
-fieldInts name node =
-  case lookupField name node of
-    Just (IntList values) -> pure values
-    _ -> throw ("missing int list field '" <> name <> "' on " <> nodeName node)
-
-declaratorName :: Node -> Text
-declaratorName declarator =
-  maybe "" identifierValue (fieldNodeMaybe "id" declarator)
 
 throw :: Text -> IRM a
 throw = Error.throwError_ . Text.unpack

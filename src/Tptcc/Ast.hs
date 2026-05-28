@@ -3,6 +3,7 @@ module Tptcc.Ast
   , NodeChild (..)
   , PostfixOp (..)
   , NodeField (..)
+  , FieldName (..)
   , NodeValue (..)
   , NodeKind (..)
   , nodeKindFor
@@ -18,6 +19,7 @@ module Tptcc.Ast
 
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
+import Data.String (IsString (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -120,10 +122,18 @@ data PostfixOp = PostfixOp
   deriving stock (Eq, Show)
 
 data NodeField = NodeField
-  { fieldName :: Text
+  { fieldName :: FieldName
   , fieldValue :: NodeValue
   }
   deriving stock (Eq, Show)
+
+newtype FieldName = FieldName
+  { fieldNameText :: Text
+  }
+  deriving stock (Eq, Ord, Show)
+
+instance IsString FieldName where
+  fromString = FieldName . Text.pack
 
 data NodeValue
   = NodeRef Node
@@ -294,17 +304,17 @@ renderField :: Int -> NodeField -> [Text]
 renderField indent field =
   case fieldValue field of
     NodeRef child ->
-      [pad (indent + 1) <> "F " <> fieldName field <> " node"]
+      [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " node"]
         <> renderNode (indent + 2) child
     NodeList children ->
-      [pad (indent + 1) <> "F " <> fieldName field <> " list"]
+      [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " list"]
         <> concatMap (renderChild (indent + 1)) (zip [(1 :: Int) ..] (map ChildNode children))
-    StringValue value -> [pad (indent + 1) <> "F " <> fieldName field <> " string " <> renderString value]
-    StringList values -> [pad (indent + 1) <> "F " <> fieldName field <> " strings " <> renderStringList values]
-    IntValue value -> [pad (indent + 1) <> "F " <> fieldName field <> " int " <> Text.pack (show value)]
-    IntList values -> [pad (indent + 1) <> "F " <> fieldName field <> " ints " <> Text.pack (show values)]
-    BoolValue value -> [pad (indent + 1) <> "F " <> fieldName field <> " bool " <> renderBool value]
-    MissingValue -> [pad (indent + 1) <> "F " <> fieldName field <> " missing"]
+    StringValue value -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " string " <> renderString value]
+    StringList values -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " strings " <> renderStringList values]
+    IntValue value -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " int " <> Text.pack (show value)]
+    IntList values -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " ints " <> Text.pack (show values)]
+    BoolValue value -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " bool " <> renderBool value]
+    MissingValue -> [pad (indent + 1) <> "F " <> fieldNameText (fieldName field) <> " missing"]
 
 renderBool :: Bool -> Text
 renderBool True = "true"

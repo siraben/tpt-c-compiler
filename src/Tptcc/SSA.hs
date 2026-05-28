@@ -66,8 +66,8 @@ data SSAPhi = SSAPhi
 
 data SSAInstr = SSAInstr
   { ssaInstrType :: InstrType
-  , ssaInstrFields :: [(Text, SSAPlace)]
-  , ssaInstrStringFields :: [(Text, Text)]
+  , ssaInstrFields :: [(InstrFieldName, SSAPlace)]
+  , ssaInstrStringFields :: [(InstrFieldName, Text)]
   }
   deriving (Eq, Show)
 
@@ -640,7 +640,7 @@ applySSAReplacements replacements =
         rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
         uses = Set.fromList (ssaUseFieldNames rawInstr)
         rewriteField name place
-          | name `Set.member` uses || "_in" `Text.isSuffixOf` name = replaceSSAPlace replacements place
+          | name `Set.member` uses || "_in" `Text.isSuffixOf` instrFieldNameText name = replaceSSAPlace replacements place
           | otherwise = place
 
 replaceSSAPlace :: Map.Map SSAPlaceKey SSAPlace -> SSAPlace -> SSAPlace
@@ -686,7 +686,7 @@ ssaUsedPlaces :: (Place -> Bool) -> Instr -> [Place]
 ssaUsedPlaces ssaPlacePredicate instr =
   uniquePlaces [place | name <- ssaUseFieldNames instr, let place = fieldPlace name instr, ssaPlacePredicate place]
 
-ssaUseFieldNames :: Instr -> [Text]
+ssaUseFieldNames :: Instr -> [InstrFieldName]
 ssaUseFieldNames instr =
   case instrType instr of
     ISt
@@ -718,7 +718,7 @@ ssaUseFieldNames instr =
   where
     useDest = ["source", "dest"]
 
-ssaDefFieldNames :: Instr -> [Text]
+ssaDefFieldNames :: Instr -> [InstrFieldName]
 ssaDefFieldNames instr =
   case instrType instr of
     ISt
@@ -904,7 +904,7 @@ lowerSSAInstr placeMap instr =
     baseFields =
       [ (name, lowerSSAPlace placeMap place)
       | (name, place) <- ssaInstrFields instr
-      , not ("_in" `Text.isSuffixOf` name)
+      , not ("_in" `Text.isSuffixOf` instrFieldNameText name)
       ]
     loweredFields = baseFields
     prefix =
@@ -995,14 +995,14 @@ prettyGlobalInstr index instr =
     <> PP.pretty (show index)
     <> tabDoc
     <> PP.pretty (instrMnemonic (instrType instr))
-    <> PP.hcat [tabDoc <> PP.pretty name <> textDoc "=" <> prettyPlace place | (name, place) <- instrFields instr]
+    <> PP.hcat [tabDoc <> PP.pretty (instrFieldNameText name) <> textDoc "=" <> prettyPlace place | (name, place) <- instrFields instr]
     <> PP.hcat (map prettyStringField (instrStringFields instr))
 
-prettyField :: (Text, SSAPlace) -> PP.Doc ann
-prettyField (name, place) = tabDoc <> PP.pretty name <> textDoc "=" <> prettySSAPlace place
+prettyField :: (InstrFieldName, SSAPlace) -> PP.Doc ann
+prettyField (name, place) = tabDoc <> PP.pretty (instrFieldNameText name) <> textDoc "=" <> prettySSAPlace place
 
-prettyStringField :: (Text, Text) -> PP.Doc ann
-prettyStringField (name, value) = tabDoc <> PP.pretty name <> textDoc "=" <> PP.pretty value
+prettyStringField :: (InstrFieldName, Text) -> PP.Doc ann
+prettyStringField (name, value) = tabDoc <> PP.pretty (instrFieldNameText name) <> textDoc "=" <> PP.pretty value
 
 prettySSAPlace :: SSAPlace -> PP.Doc ann
 prettySSAPlace place =

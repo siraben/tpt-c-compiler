@@ -52,17 +52,17 @@ renderInstruction options localSize instr =
       third <- requirePlace thirdName instr
       pure (render first second third)
 
-requirePlace :: Text -> Instr -> Either String Place
+requirePlace :: InstrFieldName -> Instr -> Either String Place
 requirePlace name instr =
   case lookup name (instrFields instr) of
     Just place -> pure place
-    Nothing -> Left ("missing instruction field '" <> Text.unpack name <> "' for " <> Text.unpack (instrMnemonic (instrType instr)))
+    Nothing -> Left ("missing instruction field '" <> Text.unpack (instrFieldNameText name) <> "' for " <> Text.unpack (instrMnemonic (instrType instr)))
 
-requireString :: Text -> Instr -> Either String Text
+requireString :: InstrFieldName -> Instr -> Either String Text
 requireString name instr =
   case lookup name (instrStringFields instr) of
     Just value -> pure value
-    Nothing -> Left ("missing instruction string field '" <> Text.unpack name <> "' for " <> Text.unpack (instrMnemonic (instrType instr)))
+    Nothing -> Left ("missing instruction string field '" <> Text.unpack (instrFieldNameText name) <> "' for " <> Text.unpack (instrMnemonic (instrType instr)))
 
 isBinaryInstruction :: InstrType -> Bool
 isBinaryInstruction instr =

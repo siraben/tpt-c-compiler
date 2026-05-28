@@ -2,6 +2,7 @@ module Tptcc.NodeFields
   ( boolFieldDefault
   , childNodes
   , constantValue
+  , declaratorName
   , enumMemberValues
   , fieldIntDefault
   , fieldIntMaybe
@@ -14,6 +15,7 @@ module Tptcc.NodeFields
   , hasNodeField
   , identifierValue
   , lookupField
+  , storageClassKind
   ) where
 
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -24,54 +26,54 @@ import Tptcc.Token (tokenName)
 childNodes :: Node -> [Node]
 childNodes node = [child | ChildNode child <- nodeChildren node]
 
-lookupField :: Text -> Node -> Maybe NodeValue
+lookupField :: FieldName -> Node -> Maybe NodeValue
 lookupField name node =
   listToMaybe [value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
 
-fieldNodeMaybe :: Text -> Node -> Maybe Node
+fieldNodeMaybe :: FieldName -> Node -> Maybe Node
 fieldNodeMaybe name node =
   case lookupField name node of
     Just (NodeRef child) -> Just child
     _ -> Nothing
 
-fieldNodeListMaybe :: Text -> Node -> Maybe [Node]
+fieldNodeListMaybe :: FieldName -> Node -> Maybe [Node]
 fieldNodeListMaybe name node =
   case lookupField name node of
     Just (NodeList children) -> Just children
     _ -> Nothing
 
-fieldIntMaybe :: Text -> Node -> Maybe Integer
+fieldIntMaybe :: FieldName -> Node -> Maybe Integer
 fieldIntMaybe name node =
   case lookupField name node of
     Just (IntValue value) -> Just value
     _ -> Nothing
 
-fieldIntDefault :: Text -> Integer -> Node -> Integer
+fieldIntDefault :: FieldName -> Integer -> Node -> Integer
 fieldIntDefault name fallback node =
   fromMaybe fallback (fieldIntMaybe name node)
 
-fieldIntsDefault :: Text -> [Integer] -> Node -> [Integer]
+fieldIntsDefault :: FieldName -> [Integer] -> Node -> [Integer]
 fieldIntsDefault name fallback node =
   case lookupField name node of
     Just (IntList values) -> values
     _ -> fallback
 
-fieldStringDefault :: Text -> Text -> Node -> Text
+fieldStringDefault :: FieldName -> Text -> Node -> Text
 fieldStringDefault name fallback node =
   case lookupField name node of
     Just (StringValue value) -> value
     _ -> fallback
 
-boolFieldDefault :: Text -> Bool -> Node -> Bool
+boolFieldDefault :: FieldName -> Bool -> Node -> Bool
 boolFieldDefault name fallback node =
   case lookupField name node of
     Just (BoolValue value) -> value
     _ -> fallback
 
-hasBoolField :: Text -> Node -> Bool
+hasBoolField :: FieldName -> Node -> Bool
 hasBoolField name = boolFieldDefault name False
 
-hasNodeField :: Text -> Node -> Bool
+hasNodeField :: FieldName -> Node -> Bool
 hasNodeField name node =
   case lookupField name node of
     Just (NodeRef _) -> True
@@ -79,6 +81,17 @@ hasNodeField name node =
 
 identifierValue :: Node -> Text
 identifierValue node = fieldStringDefault "id" (fieldStringDefault "value" "" node) node
+
+declaratorName :: Node -> Text
+declaratorName declarator =
+  maybe "" identifierValue (fieldNodeMaybe "id" declarator)
+
+storageClassKind :: Node -> Maybe Text
+storageClassKind declarationSpecifier =
+  fieldNodeMaybe "storage_class" declarationSpecifier >>= \storage ->
+    case lookupField "kind" storage of
+      Just (StringValue kind) -> Just kind
+      _ -> Nothing
 
 firstJust :: [Maybe a] -> Maybe a
 firstJust [] = Nothing

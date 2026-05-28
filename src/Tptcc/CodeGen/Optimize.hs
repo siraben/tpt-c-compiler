@@ -10,10 +10,10 @@ module Tptcc.CodeGen.Optimize
   ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (foldM)
-import Data.List (find, sort, sortBy)
+import Data.List (maximumBy, sortBy)
 import Data.Maybe (isJust, listToMaybe)
 import qualified Data.Map.Strict as Map
+import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -99,7 +99,7 @@ rewriteInstructionUses env instr =
                 else resolved
       | otherwise = place
 
-fieldAcceptsImmediate :: Instr -> Text -> Bool
+fieldAcceptsImmediate :: Instr -> InstrFieldName -> Bool
 fieldAcceptsImmediate instr name =
   case instrType instr of
     IMov -> name == "source"
@@ -243,9 +243,8 @@ colourTac tac =
       ordered = sortBlocks blocks2
       blocks3 = map computePerInstructionLiveness ordered
       graph = buildInterferenceGraph blocks3
-      colourOrder = luaIntegerPairsOrder (Map.keys graph)
-      preferences = movePreferences tac
-   in colourGraph preferences colourOrder graph
+      moves = moveSet tac
+   in colourGraph moves graph
 
 buildBasicBlocks :: [Instr] -> [BasicBlock]
 buildBasicBlocks tac = finalBlocks
@@ -378,60 +377,338 @@ buildInterferenceGraph =
       let (_, defSet) = instructionUseDef instr
        in foldl' (\graph' def -> addDefInterference graph' def liveOut) graph (Set.toList defSet)
     addDefInterference graph def liveOut =
-      foldl' (addEdge def) (Map.insertWith Set.union def Set.empty graph) (Set.toList liveOut)
-    addEdge a graph b =
-      Map.insertWith Set.union b (Set.singleton a) $
-        Map.insertWith Set.union a (Set.singleton b) graph
+      foldl' (addGraphEdge def) (Map.insertWith Set.union def Set.empty graph) (Set.toList liveOut)
+    addGraphEdge a graph b
+      | a == b = graph
+      | otherwise =
+          Map.insertWith Set.union b (Set.singleton a) $
+            Map.insertWith Set.union a (Set.singleton b) graph
 
-colourGraph :: Map.Map Integer [Integer] -> [Integer] -> Map.Map Integer (Set.Set Integer) -> Either Integer (Map.Map Integer Integer)
-colourGraph preferences order graph =
-  foldM colourOne Map.empty order
+data AllocMove = AllocMove Integer Integer
+  deriving stock (Eq, Ord, Show)
+
+data AllocState = AllocState
+  { allocAdjacency :: Map.Map Integer (Set.Set Integer)
+  , allocDegree :: Map.Map Integer Int
+  , allocMoveList :: Map.Map Integer (Set.Set AllocMove)
+  , allocAlias :: Map.Map Integer Integer
+  , allocSelectStack :: [Integer]
+  , allocSimplifyWorklist :: Set.Set Integer
+  , allocFreezeWorklist :: Set.Set Integer
+  , allocSpillWorklist :: Set.Set Integer
+  , allocSpilledNodes :: Set.Set Integer
+  , allocCoalescedNodes :: Set.Set Integer
+  , allocWorklistMoves :: Set.Set AllocMove
+  , allocActiveMoves :: Set.Set AllocMove
+  , allocCoalescedMoves :: Set.Set AllocMove
+  , allocConstrainedMoves :: Set.Set AllocMove
+  , allocFrozenMoves :: Set.Set AllocMove
+  }
+  deriving stock (Eq, Show)
+
+colourGraph :: Set.Set AllocMove -> Map.Map Integer (Set.Set Integer) -> Either Integer (Map.Map Integer Integer)
+colourGraph moves graph =
+  assignColours (allocateWorklists initialState)
   where
-    colourOne mapping reg =
-      let usedColours = Set.fromList [usedColour | neighbour <- Set.toList (Map.findWithDefault Set.empty reg graph), Just usedColour <- [Map.lookup neighbour mapping]]
-          preferredColours =
-            [ colour
-            | preferred <- Map.findWithDefault [] reg preferences
-            , Just colour <- [Map.lookup preferred mapping]
-            , colour `Set.notMember` usedColours
-            ]
-          chosen = listToMaybe preferredColours <|> firstAvailableColour usedColours
-       in case chosen of
-            Just chosenColour -> pure (Map.insert reg chosenColour mapping)
-            Nothing -> Left reg
+    nodes = Set.unions (Set.fromList (Map.keys graph) : Map.elems graph <> [moveNodes moves])
+    initialState =
+      makeWorklists
+        AllocState
+          { allocAdjacency = Map.unionWith Set.union graph (Map.fromSet (const Set.empty) nodes)
+          , allocDegree = Map.fromSet (\node -> Set.size (Map.findWithDefault Set.empty node graph)) nodes
+          , allocMoveList = foldl' addMoveForNodes Map.empty (Set.toList moves)
+          , allocAlias = Map.empty
+          , allocSelectStack = []
+          , allocSimplifyWorklist = Set.empty
+          , allocFreezeWorklist = Set.empty
+          , allocSpillWorklist = Set.empty
+          , allocSpilledNodes = Set.empty
+          , allocCoalescedNodes = Set.empty
+          , allocWorklistMoves = moves
+          , allocActiveMoves = Set.empty
+          , allocCoalescedMoves = Set.empty
+          , allocConstrainedMoves = Set.empty
+          , allocFrozenMoves = Set.empty
+          }
+        nodes
 
-luaIntegerPairsOrder :: [Integer] -> [Integer]
-luaIntegerPairsOrder keys =
-  sort arrayKeys <> sortBy compareLuaHash hashKeys
+allocateWorklists :: AllocState -> AllocState
+allocateWorklists state
+  | Just node <- popMin (allocSimplifyWorklist state) =
+      allocateWorklists (simplifyNode node state)
+  | Just move <- popMin (allocWorklistMoves state) =
+      allocateWorklists (coalesceMove move state)
+  | Just node <- popMin (allocFreezeWorklist state) =
+      allocateWorklists (freezeNode node state)
+  | Just node <- chooseSpillNode state =
+      allocateWorklists (selectSpillNode node state)
+  | otherwise = state
+
+makeWorklists :: AllocState -> Set.Set Integer -> AllocState
+makeWorklists =
+  Set.foldl' addInitialNode
   where
-    arraySize = luaArraySize keys
-    (arrayKeys, hashKeys) = spanLuaArrayKeys arraySize keys
-    modulus = max 1 (nextPowerOfTwo (max 1 (length hashKeys)) - 1)
-    compareLuaHash a b =
-      compare (a `mod` fromIntegral modulus, a) (b `mod` fromIntegral modulus, b)
+    addInitialNode state node
+      | nodeDegree state node >= registerCount =
+          state {allocSpillWorklist = Set.insert node (allocSpillWorklist state)}
+      | moveRelated state node =
+          state {allocFreezeWorklist = Set.insert node (allocFreezeWorklist state)}
+      | otherwise =
+          state {allocSimplifyWorklist = Set.insert node (allocSimplifyWorklist state)}
 
-spanLuaArrayKeys :: Integer -> [Integer] -> ([Integer], [Integer])
-spanLuaArrayKeys arraySize keys =
-  ([key | key <- keys, key > 0 && key <= arraySize], [key | key <- keys, key <= 0 || key > arraySize])
-
-luaArraySize :: [Integer] -> Integer
-luaArraySize keys =
-  fromIntegral (go 1 0)
+simplifyNode :: Integer -> AllocState -> AllocState
+simplifyNode node state =
+  foldl' (flip decrementDegree) state1 (Set.toList (adjacentNodes state node))
   where
-    positiveKeys = filter (> 0) keys
-    maxKey = maximum (0 : positiveKeys)
-    go size best
-      | fromIntegral size > maxKey = best
-      | countIn size > size `div` 2 = go (size * 2) size
-      | otherwise = go (size * 2) best
-    countIn size = length [key | key <- positiveKeys, key <= fromIntegral size]
+    state1 =
+      state
+        { allocSimplifyWorklist = Set.delete node (allocSimplifyWorklist state)
+        , allocSelectStack = node : allocSelectStack state
+        }
 
-nextPowerOfTwo :: Int -> Int
-nextPowerOfTwo value = go 1
+coalesceMove :: AllocMove -> AllocState -> AllocState
+coalesceMove move@(AllocMove x y) state =
+  case (getAlias state x, getAlias state y) of
+    (u, v)
+      | u == v ->
+          addWorklist u (moveFromWorklist move (\moves -> state {allocCoalescedMoves = Set.insert move (allocCoalescedMoves state), allocWorklistMoves = moves}) state)
+      | adjacentInGraph state u v ->
+          addWorklist v $
+            addWorklist u $
+              moveFromWorklist move (\moves -> state {allocConstrainedMoves = Set.insert move (allocConstrainedMoves state), allocWorklistMoves = moves}) state
+      | conservative state (Set.union (adjacentNodes state u) (adjacentNodes state v)) ->
+          addWorklist u (combineNodes u v (moveFromWorklist move (\moves -> state {allocCoalescedMoves = Set.insert move (allocCoalescedMoves state), allocWorklistMoves = moves}) state))
+      | otherwise ->
+          moveFromWorklist move (\moves -> state {allocActiveMoves = Set.insert move (allocActiveMoves state), allocWorklistMoves = moves}) state
+
+freezeNode :: Integer -> AllocState -> AllocState
+freezeNode node state =
+  freezeMoves node $
+    state
+      { allocFreezeWorklist = Set.delete node (allocFreezeWorklist state)
+      , allocSimplifyWorklist = Set.insert node (allocSimplifyWorklist state)
+      }
+
+selectSpillNode :: Integer -> AllocState -> AllocState
+selectSpillNode node state =
+  freezeMoves node $
+    state
+      { allocSpillWorklist = Set.delete node (allocSpillWorklist state)
+      , allocSimplifyWorklist = Set.insert node (allocSimplifyWorklist state)
+      }
+
+decrementDegree :: Integer -> AllocState -> AllocState
+decrementDegree node state
+  | oldDegree /= registerCount = state {allocDegree = Map.insert node (max 0 (oldDegree - 1)) (allocDegree state)}
+  | otherwise =
+      let nodes = Set.insert node (adjacentNodes state node)
+          state1 = enableMoves nodes state
+          state2 =
+            state1
+              { allocSpillWorklist = Set.delete node (allocSpillWorklist state1)
+              , allocDegree = Map.insert node (oldDegree - 1) (allocDegree state1)
+              }
+       in if moveRelated state2 node
+            then state2 {allocFreezeWorklist = Set.insert node (allocFreezeWorklist state2)}
+            else state2 {allocSimplifyWorklist = Set.insert node (allocSimplifyWorklist state2)}
   where
-    go power
-      | power >= value = power
-      | otherwise = go (power * 2)
+    oldDegree = nodeDegree state node
+
+enableMoves :: Set.Set Integer -> AllocState -> AllocState
+enableMoves nodes state =
+  foldl' enableOne state [move | node <- Set.toList nodes, move <- Set.toList (nodeMoves state node)]
+  where
+    enableOne st move
+      | move `Set.member` allocActiveMoves st =
+          st
+            { allocActiveMoves = Set.delete move (allocActiveMoves st)
+            , allocWorklistMoves = Set.insert move (allocWorklistMoves st)
+            }
+      | otherwise = st
+
+combineNodes :: Integer -> Integer -> AllocState -> AllocState
+combineNodes kept removed state =
+  foldl' combineAdjacent state4 (Set.toList (adjacentNodes state removed))
+  where
+    state1 =
+      state
+        { allocFreezeWorklist = Set.delete removed (allocFreezeWorklist state)
+        , allocSpillWorklist = Set.delete removed (allocSpillWorklist state)
+        , allocCoalescedNodes = Set.insert removed (allocCoalescedNodes state)
+        , allocAlias = Map.insert removed kept (allocAlias state)
+        , allocMoveList =
+            Map.insertWith
+              Set.union
+              kept
+              (Map.findWithDefault Set.empty removed (allocMoveList state))
+              (allocMoveList state)
+        }
+    state2 = enableMoves (Set.singleton removed) state1
+    state3 =
+      if nodeDegree state2 kept >= registerCount && kept `Set.member` allocFreezeWorklist state2
+        then
+          state2
+            { allocFreezeWorklist = Set.delete kept (allocFreezeWorklist state2)
+            , allocSpillWorklist = Set.insert kept (allocSpillWorklist state2)
+            }
+        else state2
+    state4 = state3
+    combineAdjacent st neighbor =
+      decrementDegree neighbor (addEdge kept neighbor st)
+
+freezeMoves :: Integer -> AllocState -> AllocState
+freezeMoves node state =
+  foldl' freezeOne state (Set.toList (nodeMoves state node))
+  where
+    freezeOne st move@(AllocMove x y) =
+      let aliasedX = getAlias st x
+          aliasedY = getAlias st y
+          other = if aliasedY == getAlias st node then aliasedX else aliasedY
+          st1 =
+            st
+              { allocActiveMoves = Set.delete move (allocActiveMoves st)
+              , allocWorklistMoves = Set.delete move (allocWorklistMoves st)
+              , allocFrozenMoves = Set.insert move (allocFrozenMoves st)
+              }
+       in if Set.null (nodeMoves st1 other) && nodeDegree st1 other < registerCount
+            then
+              st1
+                { allocFreezeWorklist = Set.delete other (allocFreezeWorklist st1)
+                , allocSimplifyWorklist = Set.insert other (allocSimplifyWorklist st1)
+                }
+            else st1
+
+addWorklist :: Integer -> AllocState -> AllocState
+addWorklist node state
+  | not (moveRelated state node)
+      && nodeDegree state node < registerCount
+      && node `Set.member` allocFreezeWorklist state =
+      state
+        { allocFreezeWorklist = Set.delete node (allocFreezeWorklist state)
+        , allocSimplifyWorklist = Set.insert node (allocSimplifyWorklist state)
+        }
+  | otherwise = state
+
+addEdge :: Integer -> Integer -> AllocState -> AllocState
+addEdge left right state
+  | left == right || adjacentInGraph state left right = state
+  | otherwise =
+      state
+        { allocAdjacency =
+            Map.insertWith Set.union right (Set.singleton left) $
+              Map.insertWith Set.union left (Set.singleton right) (allocAdjacency state)
+        , allocDegree = Map.adjust (+ 1) right (Map.adjust (+ 1) left (allocDegree state))
+        }
+
+assignColours :: AllocState -> Either Integer (Map.Map Integer Integer)
+assignColours state =
+  let (spilled, colours) = foldl' colourOne (allocSpilledNodes state, Map.empty) (allocSelectStack state)
+      coloursWithCoalesced =
+        foldl'
+          (\acc node -> Map.insert node (acc Map.! getAlias state node) acc)
+          colours
+          (Set.toList (allocCoalescedNodes state))
+   in case Set.minView spilled of
+        Just (node, _) -> Left node
+        Nothing -> Right coloursWithCoalesced
+  where
+    colourOne (spilled, colours) node =
+      let usedColours =
+            Set.fromList
+              [ colour
+              | neighbor <- Set.toList (Map.findWithDefault Set.empty node (allocAdjacency state))
+              , Just colour <- [Map.lookup (getAlias state neighbor) colours]
+              ]
+          available = [colour | colour <- allocatableRegisters, colour `Set.notMember` usedColours]
+       in case preferredAvailableColour state colours usedColours node <|> listToMaybe available of
+            Just colour -> (spilled, Map.insert node colour colours)
+            Nothing -> (Set.insert node spilled, colours)
+
+preferredAvailableColour :: AllocState -> Map.Map Integer Integer -> Set.Set Integer -> Integer -> Maybe Integer
+preferredAvailableColour state colours usedColours node =
+  listToMaybe
+    [ colour
+    | AllocMove x y <- Set.toList (Map.findWithDefault Set.empty node (allocMoveList state))
+    , let other = if getAlias state x == node then getAlias state y else getAlias state x
+    , Just colour <- [Map.lookup other colours]
+    , colour `Set.notMember` usedColours
+    ]
+
+nodeMoves :: AllocState -> Integer -> Set.Set AllocMove
+nodeMoves state node =
+  Map.findWithDefault Set.empty node (allocMoveList state)
+    `Set.intersection` Set.union (allocActiveMoves state) (allocWorklistMoves state)
+
+moveRelated :: AllocState -> Integer -> Bool
+moveRelated state = not . Set.null . nodeMoves state
+
+adjacentNodes :: AllocState -> Integer -> Set.Set Integer
+adjacentNodes state node =
+  Map.findWithDefault Set.empty node (allocAdjacency state)
+    `Set.difference` Set.union (Set.fromList (allocSelectStack state)) (allocCoalescedNodes state)
+
+conservative :: AllocState -> Set.Set Integer -> Bool
+conservative state nodes =
+  length [node | node <- Set.toList nodes, nodeDegree state node >= registerCount] < registerCount
+
+chooseSpillNode :: AllocState -> Maybe Integer
+chooseSpillNode state =
+  case Set.toList (allocSpillWorklist state) of
+    [] -> Nothing
+    nodes -> Just (maximumBy (comparing (nodeDegree state)) nodes)
+
+nodeDegree :: AllocState -> Integer -> Int
+nodeDegree state node =
+  Map.findWithDefault 0 node (allocDegree state)
+
+adjacentInGraph :: AllocState -> Integer -> Integer -> Bool
+adjacentInGraph state left right =
+  right `Set.member` Map.findWithDefault Set.empty left (allocAdjacency state)
+
+getAlias :: AllocState -> Integer -> Integer
+getAlias state node
+  | node `Set.member` allocCoalescedNodes state =
+      maybe node (getAlias state) (Map.lookup node (allocAlias state))
+  | otherwise = node
+
+popMin :: Set.Set a -> Maybe a
+popMin = fmap fst . Set.minView
+
+moveFromWorklist :: AllocMove -> (Set.Set AllocMove -> AllocState) -> AllocState -> AllocState
+moveFromWorklist move update state =
+  update (Set.delete move (allocWorklistMoves state))
+
+addMoveForNodes :: Map.Map Integer (Set.Set AllocMove) -> AllocMove -> Map.Map Integer (Set.Set AllocMove)
+addMoveForNodes moveList move@(AllocMove source dest) =
+  Map.insertWith Set.union source (Set.singleton move) $
+    Map.insertWith Set.union dest (Set.singleton move) moveList
+
+moveSet :: [Instr] -> Set.Set AllocMove
+moveSet =
+  Set.fromList . mapMaybeMove
+  where
+    mapMaybeMove [] = []
+    mapMaybeMove (instr : instrs)
+      | instrType instr == IMov
+      , let source = fieldPlace "source" instr
+      , let dest = fieldPlace "dest" instr
+      , isVirtualRegister source
+      , isVirtualRegister dest
+      , placeInteger source /= placeInteger dest =
+          normalizedMove (placeInteger source) (placeInteger dest) : mapMaybeMove instrs
+      | otherwise = mapMaybeMove instrs
+
+moveNodes :: Set.Set AllocMove -> Set.Set Integer
+moveNodes moves =
+  Set.fromList [node | AllocMove source dest <- Set.toList moves, node <- [source, dest]]
+
+normalizedMove :: Integer -> Integer -> AllocMove
+normalizedMove left right
+  | left <= right = AllocMove left right
+  | otherwise = AllocMove right left
+
+registerCount :: Int
+registerCount = length allocatableRegisters
 
 allocatableRegisters :: [Integer]
 allocatableRegisters = [1 .. 19]
@@ -444,10 +721,6 @@ spillScratchA = Place "r" "20"
 
 spillScratchB :: Place
 spillScratchB = Place "r" "21"
-
-firstAvailableColour :: Set.Set Integer -> Maybe Integer
-firstAvailableColour used =
-  find (`Set.notMember` used) allocatableRegisters
 
 usedAllocatedRegisters :: [Instr] -> [Integer]
 usedAllocatedRegisters instrs =
@@ -469,21 +742,6 @@ allocatedPhysicalRegister place
         Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
   | otherwise = Nothing
-
-movePreferences :: [Instr] -> Map.Map Integer [Integer]
-movePreferences =
-  foldl' addPreference Map.empty
-  where
-    addPreference preferences instr
-      | instrType instr == IMov
-          && isVirtualRegister source
-          && isVirtualRegister dest =
-          Map.insertWith (<>) (placeInteger source) [placeInteger dest] $
-            Map.insertWith (<>) (placeInteger dest) [placeInteger source] preferences
-      | otherwise = preferences
-      where
-        source = fieldPlace "source" instr
-        dest = fieldPlace "dest" instr
 
 spillVirtualRegister :: Integer -> Place -> [Instr] -> [Instr]
 spillVirtualRegister reg spillSlot =
@@ -539,7 +797,7 @@ instructionUseDef instr =
   where
     regSet names = Set.fromList [placeInteger place | name <- names, let place = fieldPlace name instr, isVirtualRegister place]
 
-useFieldNames :: Instr -> [Text]
+useFieldNames :: Instr -> [InstrFieldName]
 useFieldNames instr =
   case instrType instr of
     ISt -> ["dest", "source"]
@@ -569,7 +827,7 @@ useFieldNames instr =
   where
     useDest = ["source", "dest"]
 
-defFieldNames :: Instr -> [Text]
+defFieldNames :: Instr -> [InstrFieldName]
 defFieldNames instr =
   case instrType instr of
     ISt -> []
