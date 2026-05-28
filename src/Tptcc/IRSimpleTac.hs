@@ -1468,9 +1468,10 @@ inferExpressionType node =
 
 inferLastChild :: Node -> TacM CType
 inferLastChild node =
-  case childNodes node of
-    [] -> pure (base "VOID")
-    children -> inferExpressionType (last children)
+  maybe (pure (base "VOID")) inferExpressionType (lastMaybe (childNodes node))
+
+lastMaybe :: [a] -> Maybe a
+lastMaybe = foldl' (\_ value -> Just value) Nothing
 
 inferIdentifierType :: Node -> TacM CType
 inferIdentifierType node = do

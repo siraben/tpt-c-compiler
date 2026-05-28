@@ -3,9 +3,11 @@ module Tptcc.Lexer
   ) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, toLower, toUpper)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Numeric (readHex)
+import Text.Read (readMaybe)
 
 import Tptcc.Token
 
@@ -282,7 +284,7 @@ decodeCharacter raw = ValueString (Text.pack raw)
 parseInteger :: String -> Integer
 parseInteger raw =
   let stripped = case reverse raw of
-        'u' : rest -> reverse rest
+        suffix : rest | toLower suffix == 'u' -> reverse rest
         _ -> raw
    in case stripped of
         '0' : x : digits
@@ -290,7 +292,7 @@ parseInteger raw =
               case readHex digits of
                 (n, _) : _ -> n
                 [] -> 0
-        _ -> read stripped
+        _ -> fromMaybe 0 (readMaybe stripped)
 
 mkToken :: String -> TokenValue -> Int -> Int -> Token
 mkToken name value line column =

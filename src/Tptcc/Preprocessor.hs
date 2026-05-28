@@ -103,10 +103,10 @@ expandMacros table = go
                     _ -> name <> go suffix
                 Nothing -> name <> go suffix
       | c == '"' =
-          let (literal, suffix) = spanString rest
+          let (literal, suffix) = spanQuoted '"' rest
            in c : literal <> go suffix
       | c == '\'' =
-          let (literal, suffix) = spanChar rest
+          let (literal, suffix) = spanQuoted '\'' rest
            in c : literal <> go suffix
       | otherwise = c : go rest
 
@@ -250,25 +250,16 @@ splitCommas raw =
         [] -> [prefix]
         _ : rest -> prefix : splitCommas rest
 
-spanString :: String -> (String, String)
-spanString [] = ([], [])
-spanString ('\\' : c : rest) =
-  let (literal, suffix) = spanString rest
+spanQuoted :: Char -> String -> (String, String)
+spanQuoted _ [] = ([], [])
+spanQuoted quote ('\\' : c : rest) =
+  let (literal, suffix) = spanQuoted quote rest
    in ('\\' : c : literal, suffix)
-spanString ('"' : rest) = ("\"", rest)
-spanString (c : rest) =
-  let (literal, suffix) = spanString rest
-   in (c : literal, suffix)
-
-spanChar :: String -> (String, String)
-spanChar [] = ([], [])
-spanChar ('\\' : c : rest) =
-  let (literal, suffix) = spanChar rest
-   in ('\\' : c : literal, suffix)
-spanChar ('\'' : rest) = ("'", rest)
-spanChar (c : rest) =
-  let (literal, suffix) = spanChar rest
-   in (c : literal, suffix)
+spanQuoted quote (c : rest)
+  | c == quote = ([quote], rest)
+  | otherwise =
+      let (literal, suffix) = spanQuoted quote rest
+       in (c : literal, suffix)
 
 trim :: String -> String
 trim = reverse . trimStart . reverse . trimStart

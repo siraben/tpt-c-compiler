@@ -9,7 +9,7 @@ import System.Exit (ExitCode (ExitFailure), exitWith)
 import System.FilePath (replaceExtension)
 import qualified Options.Applicative as OA
 
-import Tptcc.Ast (renderAst)
+import Tptcc.Ast (Node, renderAst)
 import Tptcc.CodeGen (CodeGenOptions (..), defaultCodeGenOptions, dumpNativeAsmOptimized, dumpNativeAsmOptimizedWithOptions, dumpNativeAsmUnoptimized)
 import Tptcc.CType (renderTypePretty)
 import Tptcc.IRGlobal (dumpIRGlobals)
@@ -103,7 +103,7 @@ compileConfigParser =
       CompileConfig
         { compileInput = input
         , compileOutput = fromMaybe (replaceExtension input "asm") output
-        , compileOptions = foldl (flip ($)) defaultCodeGenOptions optionUpdates
+        , compileOptions = foldl' (flip ($)) defaultCodeGenOptions optionUpdates
         , compileSymbolsOutput = symbols
         }
 
@@ -148,77 +148,52 @@ runCommand = \case
 
 runNativeCompiler :: CompileConfig -> IO ()
 runNativeCompiler config = do
-  source <- preprocessFile (compileInput config)
-  case Parser.parse (lexC source) >>= dumpNativeAsmOptimizedWithOptions (compileOptions config) of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right asm -> do
-      writeFile (compileOutput config) asm
-      maybe (pure ()) (const (putStrLn "[ERROR] dkjson not found, symbols cannot be exported to json")) (compileSymbolsOutput config)
+  asm <- compileInputWith (compileInput config) (dumpNativeAsmOptimizedWithOptions (compileOptions config))
+  writeFile (compileOutput config) asm
+  maybe (pure ()) (const (putStrLn "[ERROR] dkjson not found, symbols cannot be exported to json")) (compileSymbolsOutput config)
 
 dumpNativeAsmOptimizedEvents :: FilePath -> IO ()
-dumpNativeAsmOptimizedEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= dumpNativeAsmOptimized of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right asm -> putStr asm
+dumpNativeAsmOptimizedEvents input =
+  putStr =<< compileInputWith input dumpNativeAsmOptimized
 
 dumpNativeAsmUnoptimizedEvents :: FilePath -> IO ()
-dumpNativeAsmUnoptimizedEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= dumpNativeAsmUnoptimized of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right asm -> putStr asm
+dumpNativeAsmUnoptimizedEvents input =
+  putStr =<< compileInputWith input dumpNativeAsmUnoptimized
 
 dumpSimpleTacEvents :: FilePath -> IO ()
-dumpSimpleTacEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= dumpSimpleTac of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right events -> mapM_ putStrLn events
+dumpSimpleTacEvents input =
+  printLines =<< compileInputWith input dumpSimpleTac
 
 dumpSSAEvents :: FilePath -> IO ()
-dumpSSAEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= dumpSSA of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right events -> mapM_ putStrLn events
+dumpSSAEvents input =
+  printLines =<< compileInputWith input dumpSSA
 
 dumpIRGlobalEvents :: FilePath -> IO ()
-dumpIRGlobalEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= dumpIRGlobals of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right events -> mapM_ putStrLn events
+dumpIRGlobalEvents input =
+  printLines =<< compileInputWith input dumpIRGlobals
 
 dumpTypeEvents :: FilePath -> IO ()
-dumpTypeEvents input = do
-  source <- preprocessFile input
-  case Parser.parse (lexC source) >>= TypeChecker.typeEvents of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right events -> mapM_ putStrLn events
+dumpTypeEvents input =
+  printLines =<< compileInputWith input TypeChecker.typeEvents
 
 dumpAst :: FilePath -> IO ()
-dumpAst input = do
+dumpAst input =
+  putStr =<< compileInputWith input (Right . renderAst)
+
+compileInputWith :: FilePath -> (Node -> Either String a) -> IO a
+compileInputWith input action = do
   source <- preprocessFile input
-  case Parser.parse (lexC source) of
-    Left err -> do
-      putStrLn err
-      exitWith (ExitFailure 1)
-    Right ast -> putStr (renderAst ast)
+  exitOnError (Parser.parse (lexC source) >>= action)
+
+exitOnError :: Either String a -> IO a
+exitOnError = \case
+  Left err -> do
+    putStrLn err
+    exitWith (ExitFailure 1)
+  Right value -> pure value
+
+printLines :: [String] -> IO ()
+printLines = mapM_ putStrLn
 
 dumpDefaultSymbols :: IO ()
 dumpDefaultSymbols =

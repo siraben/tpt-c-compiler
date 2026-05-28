@@ -16,7 +16,7 @@ module Tptcc.NodeFields
   , lookupField
   ) where
 
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Tptcc.Ast
 import Tptcc.Token (tokenName)
@@ -26,7 +26,7 @@ childNodes node = [child | ChildNode child <- nodeChildren node]
 
 lookupField :: Text -> Node -> Maybe NodeValue
 lookupField name node =
-  firstJust [Just value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
+  listToMaybe [value | NodeField fieldName' value <- nodeFields node, fieldName' == name]
 
 fieldNodeMaybe :: Text -> Node -> Maybe Node
 fieldNodeMaybe name node =
@@ -87,7 +87,7 @@ firstJust (Nothing : values) = firstJust values
 
 enumMemberValues :: [Node] -> [(Node, Integer)]
 enumMemberValues members =
-  let (_, values, _) = foldl assign (0, [], []) members
+  let (_, values, _) = foldl' assign (0, [], []) members
    in reverse values
   where
     assign (nextValue, values, env) member =
@@ -101,7 +101,7 @@ constantValue env node =
     NodeInt -> fieldIntDefault "value" 0 node
     NodeCharacter -> fieldIntDefault "value" 0 node
     NodeIdentifier -> fromMaybe 0 (lookup (identifierValue node) env)
-    NodeExpression -> last (0 : map (constantValue env) (childNodes node))
+    NodeExpression -> foldl' (\_ child -> constantValue env child) 0 (childNodes node)
     NodeUnaryExpression ->
       let value = maybe 0 (constantValue env) (fieldNodeMaybe "child" node)
        in case fieldStringDefault "operator" "" node of
@@ -118,8 +118,8 @@ constantValue env node =
         else maybe 0 (constantValue env) (fieldNodeMaybe "false_case" node)
     NodeLogicalOrExpression -> boolInt (any ((/= 0) . constantValue env) (childNodes node))
     NodeLogicalAndExpression -> boolInt (all ((/= 0) . constantValue env) (childNodes node))
-    NodeInclusiveOrExpression -> foldl integerBitOr 0 (map (constantValue env) (childNodes node))
-    NodeInclusiveXorExpression -> foldl xorInteger 0 (map (constantValue env) (childNodes node))
+    NodeInclusiveOrExpression -> foldl' integerBitOr 0 (map (constantValue env) (childNodes node))
+    NodeInclusiveXorExpression -> foldl' xorInteger 0 (map (constantValue env) (childNodes node))
     NodeInclusiveAndExpression -> foldl1Safe integerBitAnd (map (constantValue env) (childNodes node))
     NodeEqualityExpression -> compareChain env node
     NodeRelationalExpression -> compareChain env node
@@ -177,7 +177,7 @@ compareChain env node =
 
 foldl1Safe :: (Integer -> Integer -> Integer) -> [Integer] -> Integer
 foldl1Safe _ [] = 0
-foldl1Safe f (value : values) = foldl f value values
+foldl1Safe f (value : values) = foldl' f value values
 
 xorInteger :: Integer -> Integer -> Integer
 xorInteger a b = integerBitOr a b - integerBitAnd a b

@@ -201,7 +201,7 @@ sizeof ty =
 
 withMemberOffsets :: Bool -> [Member] -> [Member]
 withMemberOffsets isStruct members'
-  | isStruct = reverse (snd (foldl addStructMember (0, []) members'))
+  | isStruct = reverse (snd (foldl' addStructMember (0, []) members'))
   | otherwise = [member {memberOffset = Just 0} | member <- members']
   where
     addStructMember (offset, acc) member =

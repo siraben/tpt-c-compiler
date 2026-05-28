@@ -13,6 +13,7 @@ import Effectful
 import Effectful.State.Static.Local (State)
 import qualified Effectful.State.Static.Local as State
 import qualified Text.Megaparsec as MP
+import Text.Read (readMaybe)
 
 import Tptcc.Ast
 import Tptcc.Token
@@ -1226,7 +1227,7 @@ tokenInteger :: Token -> Integer
 tokenInteger token =
   case tokenValue token of
     ValueInt value -> value
-    ValueString value -> read (Text.unpack value)
+    ValueString value -> fromMaybe 0 (readMaybe (Text.unpack value))
 
 constantValue :: Node -> Integer
 constantValue node =
@@ -1234,9 +1235,7 @@ constantValue node =
     "INT" -> intField "value" node
     "CHARACTER" -> intField "value" node
     "EXPRESSION" ->
-      case childNodesLocal node of
-        [child] -> constantValue child
-        children -> last (0 : map constantValue children)
+      foldl' (\_ child -> constantValue child) 0 (childNodesLocal node)
     "UNARY_EXPRESSION" ->
       let child = nodeField "child" node
        in case stringFieldDefaultLocal "operator" "" node of
@@ -1253,8 +1252,8 @@ constantValue node =
         else constantValue (nodeField "false_case" node)
     "LOGICAL_OR_EXPRESSION" -> boolInt (any ((/= 0) . constantValue) (childNodesLocal node))
     "LOGICAL_AND_EXPRESSION" -> boolInt (all ((/= 0) . constantValue) (childNodesLocal node))
-    "INCLUSIVE_OR_EXPRESSION" -> foldl (.|.) 0 (map constantValue (childNodesLocal node))
-    "INCLUSIVE_XOR_EXPRESSION" -> foldl xorInteger 0 (map constantValue (childNodesLocal node))
+    "INCLUSIVE_OR_EXPRESSION" -> foldl' (.|.) 0 (map constantValue (childNodesLocal node))
+    "INCLUSIVE_XOR_EXPRESSION" -> foldl' xorInteger 0 (map constantValue (childNodesLocal node))
     "INCLUSIVE_AND_EXPRESSION" -> foldl1Safe (.&.) (map constantValue (childNodesLocal node))
     "EQUALITY_EXPRESSION" -> compareChain node
     "RELATIONAL_EXPRESSION" -> compareChain node
@@ -1277,7 +1276,7 @@ constantValue node =
     stringFieldDefaultLocal name fallback n =
       fromMaybe fallback (stringField name n)
     foldl1Safe _ [] = 0
-    foldl1Safe f (value : values) = foldl f value values
+    foldl1Safe f (value : values) = foldl' f value values
     xorInteger a b = (a .|. b) - (a .&. b)
     (.&.) = integerBitAnd
     (.|.) = integerBitOr
@@ -1388,9 +1387,9 @@ stringListField name node =
 
 stripQuotes :: Text -> Text
 stripQuotes value =
-  if Text.length value >= 2 && Text.head value == '"' && Text.last value == '"'
-    then Text.init (Text.tail value)
-    else value
+  fromMaybe value $ do
+    withoutLeading <- Text.stripPrefix "\"" value
+    Text.stripSuffix "\"" withoutLeading
 
 joinAsm :: [Text] -> Text
 joinAsm = Text.intercalate "\n\t"

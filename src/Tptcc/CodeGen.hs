@@ -8,6 +8,7 @@ module Tptcc.CodeGen
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
+import Data.List (intercalate)
 
 import Tptcc.Ast (Node)
 import Tptcc.CodeGen.Optimize
@@ -52,11 +53,13 @@ renderProgram options optimized program globalInfo stdlib = do
   globalAsm <- renderGlobalInstructions options optimized (tacProgramGlobalInstructions program)
   methodAsm <- mapM (renderMethod options optimized) (tacProgramMethods program)
   pure $
-    header options globalInfo
-      <> globalAsm
-      <> entryJump
-      <> concat methodAsm
-      <> renderStandardLibrary stdlib
+    concat
+      [ header options globalInfo
+      , globalAsm
+      , entryJump
+      , concat methodAsm
+      , renderStandardLibrary stdlib
+      ]
   where
     entryJump
       | any ((== "main") . methodOutputName) (tacProgramMethods program) = "\tjmp __tptcc_fn_main\n"
@@ -141,12 +144,14 @@ header options globalInfo =
 renderGlobalData :: CodeGenOptions -> GlobalInfo -> String
 renderGlobalData options globalInfo
   | globalInfoSize globalInfo == 0 = ""
-  | otherwise = "dw " <> commaSep (replicate (fromInteger (codeGenGlobalAddr options - 1)) "0" <> [Text.unpack (Map.findWithDefault "0" index (globalInfoData globalInfo)) | index <- [0 .. globalInfoSize globalInfo - 1]])
-
-commaSep :: [String] -> String
-commaSep [] = ""
-commaSep [value] = value
-commaSep (value : values) = value <> ", " <> commaSep values
+  | otherwise =
+      "dw " <> intercalate ", " (padding <> globalWords)
+  where
+    padding = replicate (fromInteger (codeGenGlobalAddr options - 1)) "0"
+    globalWords =
+      [ Text.unpack (Map.findWithDefault "0" index (globalInfoData globalInfo))
+      | index <- [0 .. globalInfoSize globalInfo - 1]
+      ]
 
 renderGlobalInstructions :: CodeGenOptions -> Bool -> [Instr] -> Either String String
 renderGlobalInstructions options optimized instructions = do
