@@ -1455,8 +1455,7 @@ inferShiftType node =
 inferCastType :: Node -> TacM CType
 inferCastType node
   | hasNodeField "type_specifier" node = do
-      baseTy <- resolveTypeSpecifier =<< fieldNode "type_specifier" node
-      pure (applyPointers (fieldIntDefault "pointer_level" 0 node) baseTy)
+      resolveTypeName =<< fieldNode "type_specifier" node
   | otherwise = maybe (pure (base "INT")) inferExpressionType (fieldNodeMaybe "cast_expression" node)
 
 inferUnaryType :: Node -> TacM CType
@@ -1662,6 +1661,31 @@ resolveTypeSpecifier typeSpecifier = do
       | nodeIs NodeEnumSpecifier node -> resolveEnum node
       | otherwise -> throw ("unexpected type specifier node: " <> nodeName node)
     _ -> throw "invalid type specifier kind"
+
+resolveTypeName :: Node -> TacM CType
+resolveTypeName node = do
+  baseTy <- resolveTypeSpecifier =<< fieldNode "type_specifier" node
+  declarator <- fieldNode "declarator" node
+  buildAbstractDeclaratorType declarator baseTy
+
+buildAbstractDeclaratorType :: Node -> CType -> TacM CType
+buildAbstractDeclaratorType declarator baseTy = do
+  let pointerTy = applyPointers (fieldIntDefault "pointer_level" 0 declarator) baseTy
+  case fieldNodeMaybe "direct_abstract_declarator" declarator of
+    Just direct -> buildDirectAbstractDeclaratorType direct pointerTy
+    Nothing -> pure pointerTy
+
+buildDirectAbstractDeclaratorType :: Node -> CType -> TacM CType
+buildDirectAbstractDeclaratorType direct ty = do
+  withFunction <-
+    case fieldNodeMaybe "parameter_list" direct of
+      Just params -> buildFunctionType ty params
+      Nothing -> pure ty
+  let dimensions = map (fieldIntDefault "value" 0) (childNodes direct)
+      withArrays = foldr array withFunction dimensions
+  case fieldNodeMaybe "declarator" direct of
+    Just nested -> buildAbstractDeclaratorType nested withArrays
+    Nothing -> pure withArrays
 
 resolveStructOrUnion :: Node -> TacM CType
 resolveStructOrUnion node = do
