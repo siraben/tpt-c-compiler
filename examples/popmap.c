@@ -190,18 +190,17 @@ int main(void) {
         "st r22, term_print"
         :r23=start_r, r24=start_c, r31=end_r, r25=end_c
     );
+    show_population(start_r, start_c, end_r, end_c);
     while (1) {
-        asm(
-            "ld r22, term_input"
-        );
-        show_population(start_r, start_c, end_r, end_c);
         register char command = getchar();
         register int increment = 1;
-        if (command >= 97) {
+        if (command >= 'a' && command <= 'z') {
             increment = 1;
-        } else {
+        } else if (command >= 'A' && command <= 'Z') {
             command += 32;
             increment = 5;
+        } else {
+            continue;
         }
         register int cursor = cursor_map[command - 'a'];
         // erase other corners
@@ -232,7 +231,7 @@ int main(void) {
                     break;
                 case 'd':
                     start_c += increment;
-                    if (start_c > 29 || start_c > end_c) {
+                    if (start_c > 28 || start_c > end_c) {
                         start_c = end_c;
                     }
                     break;
@@ -346,5 +345,6 @@ int main(void) {
         );
         show_cell(0x0a, start_r, start_c);
         show_cell(0x0d, end_r, end_c);
+        show_population(start_r, start_c, end_r, end_c);
     }
 }
