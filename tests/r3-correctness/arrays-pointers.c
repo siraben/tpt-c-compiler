@@ -7,7 +7,11 @@ int main(void) {
     p = &values[0];
     p[3] = p[0] + p[1] + p[2];
     *(p + 4) = p[3] - p[1];
+    p += 2;
+    p[0] += 1;
+    p -= 2;
     putchar('0' + values[3]);
     putchar('0' + values[4]);
+    putchar('0' + values[2]);
     return 0;
 }

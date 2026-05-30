@@ -72,6 +72,66 @@ start:
 	mov r1, 0
 	st r1, 6666
 	jmp __tptcc_fn_main
+__tptcc_fn_current_map_data:
+	push r2
+	push r1
+	ld r2, 6666
+	mov r1, 0
+	cmp r2, r1
+	je .label_1
+.ssa_bb_1:
+	jmp .label_0
+.label_1:
+	mov r1, 1561
+	jmp .label_2
+.label_0:
+	mov r1, 2539
+.label_2:
+	mov return_reg, r1
+.exit_current_map_data:
+	pop r1
+	pop r2
+	ret
+__tptcc_fn_current_segment_map:
+	push r2
+	push r1
+	ld r2, 6666
+	mov r1, 0
+	cmp r2, r1
+	je .label_4
+.ssa_bb_1:
+	jmp .label_3
+.label_4:
+	mov r1, 3340
+	jmp .label_5
+.label_3:
+	mov r1, 4181
+.label_5:
+	mov return_reg, r1
+.exit_current_segment_map:
+	pop r1
+	pop r2
+	ret
+__tptcc_fn_current_map_size:
+	push r2
+	push r1
+	ld r2, 6666
+	mov r1, 0
+	cmp r2, r1
+	je .label_7
+.ssa_bb_1:
+	jmp .label_6
+.label_7:
+	ld r1, 6667
+	jmp .label_8
+.label_6:
+	ld r1, 6668
+.label_8:
+	mov return_reg, r1
+.exit_current_map_size:
+	pop r1
+	pop r2
+	ret
 __tptcc_fn_draw_map:
 	push base_pointer
 	mov base_pointer, stack_pointer
@@ -99,59 +159,58 @@ __tptcc_fn_draw_map:
 __tptcc_fn_show_population:
 	push base_pointer
 	mov base_pointer, stack_pointer
+	push r6
+	push r5
 	push r2
 	push r1
-	push r4
 	push r3
-	push r5
-	push r6
-	ld r2, base_pointer, 4
-	add r2, 1
-	ld r1, base_pointer, 5
-	add r1, 1
+	push r4
+	ld r6, base_pointer, 4
+	add r6, 1
+	ld r5, base_pointer, 5
+	add r5, 1
 	mov r23, 12
 	mov r22, 25
 	call __tptcc_fn_set_cursor
-	ld r4, 6666
-	mov r3, 0
-	cmp r4, r3
-	je .label_1
+	ld r2, 6666
+	mov r1, 0
+	cmp r2, r1
+	je .label_10
 .ssa_bb_1:
-	jmp .label_0
-.label_1:
-	mov r3, 1
-	jmp .label_2
-.label_0:
-	mov r3, 781
-.label_2:
-	mov r4, r2
-	mull r4, 30
-	mov r5, r3
-	add r5, r4
-	add r5, r1
-	ld r6, r5
-	ld r4, base_pointer, 2
-	mull r4, 30
-	mov r5, r3
-	add r5, r4
-	add r5, r1
-	ld r1, r5
-	sub r6, r1
-	mull r2, 30
-	mov r4, r3
-	add r4, r2
-	ld r1, base_pointer, 3
-	add r4, r1
-	ld r1, r4
-	sub r6, r1
-	ld r2, base_pointer, 2
-	mull r2, 30
-	add r3, r2
-	ld r1, base_pointer, 3
+	jmp .label_9
+.label_10:
+	mov r2, 1
+	jmp .label_11
+.label_9:
+	mov r2, 781
+.label_11:
+	mov r3, r6
+	mull r3, 30
+	mov r1, r2
+	add r1, r3
+	add r1, r5
+	ld r4, r1
+	ld r1, base_pointer, 2
+	mull r1, 30
+	mov r3, r2
 	add r3, r1
+	add r3, r5
 	ld r1, r3
-	add r6, r1
-	mov r22, r6
+	sub r4, r1
+	mull r6, 30
+	mov r1, r2
+	add r1, r6
+	ld r3, base_pointer, 3
+	ld r1, r1, r3
+	sub r4, r1
+	ld r1, base_pointer, 2
+	mull r1, 30
+	add r2, r1
+	ld r1, base_pointer, 3
+	add r2, r1
+	ld r1, r2
+	add r4, r1
+	mov r22, r4
 	mov r23, 0x0f
 	st r23, term_colour
 	__print_unsigned_int_inline:
@@ -204,62 +263,67 @@ __tptcc_fn_show_population:
 	mov r1, 6669
 	mov r22, r1
 	call __tptcc_fn_print_char_array
-	mov r2, 28
-	shl r2, 5
-	add r2, 10
-	mov r23, r2
+	mov r1, 28
+	shl r1, 5
+	add r1, 10
+	mov r23, r1
 	mov r22, 0
 	call __tptcc_fn_set_cursor
-	mov r1, 6675
-	mov r22, r1
+	mov r2, 6675
+	mov r22, r2
 	call __tptcc_fn_print_char_array
-	mov r23, r2
+	mov r23, r1
 	mov r22, 0
 	call __tptcc_fn_set_cursor
 	mov r1, 256
-	cmp r6, r1
-	jge .label_4
+	cmp r4, r1
+	jge .label_13
 .ssa_bb_5:
-	jmp .label_3
-.label_4:
-	mov r2, 5598
-	shr r6, 8
-	add r2, r6
-	ld r22, r2
+	jmp .label_12
+.label_13:
+	mov r1, 5598
+	shr r4, 8
+	add r1, r4
+	ld r22, r1
 	call __tptcc_fn_print_char_array
 	jmp .exit_show_population
-.label_3:
-	mov r2, 5022
-	shr r6, 2
-	add r2, r6
-	ld r22, r2
+.label_12:
+	mov r1, 5022
+	shr r4, 2
+	add r1, r4
+	ld r22, r1
 	call __tptcc_fn_print_char_array
 .exit_show_population:
-	pop r6
-	pop r5
-	pop r3
 	pop r4
+	pop r3
 	pop r1
 	pop r2
+	pop r5
+	pop r6
 	pop base_pointer
 	ret
 __tptcc_fn_clear_screen:
 	push r1
+	push r2
 	mov r22, 15
 	call __tptcc_fn_set_text_colour
-	push r1
-	push r2
-	mov r1, 29
-	mov r2, ' '
-	clear_screen_loop:
-	cmp r1, 0
-	je end_clear_screen_loop
-	sub r1, 1
-	st r2, 0x9FA4
-	jmp clear_screen_loop
-	end_clear_screen_loop:
-	pop r2
-	pop r1
+	mov r23, 0
+	mov r22, 0
+	call __tptcc_fn_set_cursor
+	mov r1, 0
+.label_15:
+	mov r2, 29
+	cmp r1, r2
+	jl .label_18
+.ssa_bb_2:
+	jmp .label_17
+.label_18:
+	mov r22, 32
+	call __tptcc_fn_putchar
+.label_16:
+	add r1, 1
+	jmp .label_15
+.label_17:
 	mov r23, 0
 	mov r22, 25
 	call __tptcc_fn_set_cursor
@@ -273,205 +337,199 @@ __tptcc_fn_clear_screen:
 	mov r22, 0
 	call __tptcc_fn_set_cursor
 .exit_clear_screen:
+	pop r2
 	pop r1
 	ret
-__tptcc_fn_show_cell:
+__tptcc_fn_draw_current_map:
+	call __tptcc_fn_clear_screen
+	call __tptcc_fn_current_map_size
+	push return_reg
+	call __tptcc_fn_current_map_data
+	push return_reg
+	call __tptcc_fn_draw_map
+	add stack_pointer, 2
+.exit_draw_current_map:
+	ret
+__tptcc_fn_show_blank_cell:
 	push base_pointer
 	mov base_pointer, stack_pointer
-	push r2
 	push r1
-	push r3
+	ld r23, base_pointer, 4
+	ld r22, base_pointer, 3
+	call __tptcc_fn_set_cursor
+	ld r1, base_pointer, 2
+	shl r1, 4
+	mov r22, r1
+	call __tptcc_fn_set_text_colour
+	mov r22, 32
+	call __tptcc_fn_putchar
+.exit_show_blank_cell:
+	pop r1
+	pop base_pointer
+	ret
+__tptcc_fn_show_corner:
+	push base_pointer
+	mov base_pointer, stack_pointer
 	ld r23, base_pointer, 4
 	ld r22, base_pointer, 3
 	call __tptcc_fn_set_cursor
 	ld r22, base_pointer, 2
 	call __tptcc_fn_set_text_colour
-	ld r2, 6666
-	mov r1, 0
-	cmp r2, r1
-	je .label_7
-.ssa_bb_1:
-	jmp .label_6
-.label_7:
-	mov r2, 3340
-	ld r1, base_pointer, 3
-	mull r1, 29
-	ld r3, base_pointer, 4
-	add r1, r3
-	add r2, r1
-	ld r1, r2
-	mov r3, 1561
-	mov r2, 8192
-	cmp r1, r2
-	jne .label_10
-.ssa_bb_3:
-	jmp .label_9
-.label_10:
-	mov r22, r1
-	mov r23, r3
-	mull r22, 3
-	add r24, r22, r23
-	ld r23, r24, 1
-	st r23, term_print_e
-	ld r24, r24, 2
-	st r24, term_print_o
-	st r0, term_print
-	jmp .label_11
-.label_9:
-	ld r1, base_pointer, 2
-	shl r1, 4
-	mov r22, r1
-	call __tptcc_fn_set_text_colour
 	mov r22, 32
 	call __tptcc_fn_putchar
-.label_11:
-	jmp .exit_show_cell
-.label_6:
-	mov r2, 4181
-	ld r1, base_pointer, 3
-	mull r1, 29
-	ld r3, base_pointer, 4
-	add r1, r3
-	add r2, r1
-	ld r1, r2
-	mov r3, 2539
-	mov r2, 8192
-	cmp r1, r2
-	jne .label_13
-.ssa_bb_8:
-	jmp .label_12
-.label_13:
-	mov r22, r1
-	mov r23, r3
-	mull r22, 3
-	add r24, r22, r23
-	ld r23, r24, 1
-	st r23, term_print_e
-	ld r24, r24, 2
-	st r24, term_print_o
-	st r0, term_print
-	jmp .exit_show_cell
-.label_12:
+.exit_show_corner:
+	pop base_pointer
+	ret
+__tptcc_fn_show_other_corners:
+	push base_pointer
+	mov base_pointer, stack_pointer
+	push r1
+	ld r1, base_pointer, 5
+	push r1
 	ld r1, base_pointer, 2
-	shl r1, 4
-	mov r22, r1
-	call __tptcc_fn_set_text_colour
-	mov r22, 32
-	call __tptcc_fn_putchar
-.exit_show_cell:
-	pop r3
+	push r1
+	mov r1, 224
+	push r1
+	call __tptcc_fn_show_corner
+	add stack_pointer, 3
+	ld r1, base_pointer, 3
+	push r1
+	ld r1, base_pointer, 4
+	push r1
+	mov r1, 224
+	push r1
+	call __tptcc_fn_show_corner
+	add stack_pointer, 3
+.exit_show_other_corners:
 	pop r1
+	pop base_pointer
+	ret
+__tptcc_fn_show_cell:
+	push base_pointer
+	mov base_pointer, stack_pointer
+	push r1
+	push r2
+	ld r23, base_pointer, 4
+	ld r22, base_pointer, 3
+	call __tptcc_fn_set_cursor
+	ld r22, base_pointer, 2
+	call __tptcc_fn_set_text_colour
+	call __tptcc_fn_current_segment_map
+	ld r1, base_pointer, 3
+	mull r1, 29
+	ld r2, base_pointer, 4
+	add r1, r2
+	mov r2, return_reg
+	add r2, r1
+	ld r1, r2
+	mov r2, 8192
+	cmp r1, r2
+	jne .label_20
+.ssa_bb_1:
+	jmp .label_19
+.label_20:
+	call __tptcc_fn_current_map_data
+	mov r22, r1
+	mov r23, return_reg
+	mull r22, 3
+	add r24, r22, r23
+	ld r23, r24, 1
+	st r23, term_print_e
+	ld r24, r24, 2
+	st r24, term_print_o
+	st r0, term_print
+	jmp .exit_show_cell
+.label_19:
+	ld r1, base_pointer, 4
+	push r1
+	ld r1, base_pointer, 3
+	push r1
+	ld r1, base_pointer, 2
+	push r1
+	call __tptcc_fn_show_blank_cell
+	add stack_pointer, 3
+.exit_show_cell:
 	pop r2
+	pop r1
 	pop base_pointer
 	ret
 __tptcc_fn_main:
-	call __tptcc_fn_clear_screen
-	ld r2, 6666
-	mov r1, 0
-	cmp r2, r1
-	je .label_16
-.ssa_bb_1:
-	jmp .label_15
-.label_16:
-	ld r1, 6667
-	push r1
-	mov r1, 1561
-	push r1
-	call __tptcc_fn_draw_map
-	add stack_pointer, 2
-	jmp .label_17
-.label_15:
-	ld r1, 6668
-	push r1
-	mov r1, 2539
-	push r1
-	call __tptcc_fn_draw_map
-	add stack_pointer, 2
-.label_17:
-	mov r6, 9
+	call __tptcc_fn_draw_current_map
+	mov r1, 9
 	mov r5, 9
 	mov r4, 17
 	mov r3, 20
 	push r5
-	push r6
-	mov r1, 10
 	push r1
+	mov r2, 10
+	push r2
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
 	push r3
 	push r4
-	mov r1, 13
-	push r1
+	mov r2, 13
+	push r2
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
-	mov r23, r6
-	mov r24, r5
-	mov r31, r4
-	mov r25, r3
-	mov r22, 0xe0
-	st r22, term_colour
-	mov r22, ' '
-	shl r23, 5
-	add r23, r25
-	st r23, term_cursor
-	st r22, term_print
-	shl r31, 5
-	add r31, r24
-	st r31, term_cursor
-	st r22, term_print
 	push r3
 	push r4
 	push r5
-	push r6
+	push r1
+	call __tptcc_fn_show_other_corners
+	add stack_pointer, 4
+	push r3
+	push r4
+	push r5
+	push r1
 	call __tptcc_fn_show_population
 	add stack_pointer, 4
-.label_18:
-	mov r1, 1
-	cmp r1, 0
-	je .exit_main
-.ssa_bb_6:
-	call __tptcc_fn_getchar
-	mov r2, return_reg
-	mov r1, 97
-	cmp return_reg, r1
-	jge .label_24
-.ssa_bb_8:
-	jmp .label_21
-.label_24:
-	mov r1, 122
-	cmp r2, r1
-	jle .label_22
-.ssa_bb_10:
-	jmp .label_21
 .label_22:
-	mov r1, 1
-	jmp .label_27
-.label_21:
-	mov r1, 65
-	cmp r2, r1
+	mov r2, 1
+	cmp r2, 0
+	je .exit_main
+.ssa_bb_2:
+	call __tptcc_fn_getchar
+	mov r6, return_reg
+	mov r2, 97
+	cmp return_reg, r2
 	jge .label_28
-.ssa_bb_13:
+.ssa_bb_4:
 	jmp .label_25
 .label_28:
-	mov r1, 90
-	cmp r2, r1
+	mov r2, 122
+	cmp r6, r2
 	jle .label_26
-.ssa_bb_15:
+.ssa_bb_6:
 	jmp .label_25
 .label_26:
-	add r2, 32
-	mov r1, 5
-	jmp .label_27
+	mov r2, 1
+	jmp .label_31
 .label_25:
-	jmp .label_18
-.label_27:
+	mov r2, 65
+	cmp r6, r2
+	jge .label_32
+.ssa_bb_9:
+	jmp .label_29
+.label_32:
+	mov r2, 90
+	cmp r6, r2
+	jle .label_30
+.ssa_bb_11:
+	jmp .label_29
+.label_30:
+	add r6, 32
+	mov r2, 5
+	jmp .label_31
+.label_29:
+	jmp .label_22
+.label_31:
 	mov r8, 6713
-	mov r7, r2
+	mov r7, r6
 	sub r7, 97
 	add r8, r7
 	ld r7, r8
 	push r3
-	push r6
+	push r1
 	mov r8, 240
 	push r8
 	call __tptcc_fn_show_cell
@@ -484,176 +542,176 @@ __tptcc_fn_main:
 	add stack_pointer, 3
 	mov r8, 1
 	cmp r7, r8
-	je .label_30
-.ssa_bb_20:
-	jmp .label_29
-.label_30:
+	je .label_34
+.ssa_bb_16:
+	jmp .label_33
+.label_34:
 	push r5
-	push r6
+	push r1
 	mov r7, 240
 	push r7
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
-	cmp r2, 119
-	je .label_33
-.ssa_bb_22:
-	cmp r2, 97
+	cmp r6, 119
 	je .label_37
-.ssa_bb_23:
-	cmp r2, 115
+.ssa_bb_18:
+	cmp r6, 97
 	je .label_41
-.ssa_bb_24:
-	cmp r2, 100
-	je .label_46
-.ssa_bb_25:
-	jmp .label_47
-.label_33:
-	mov r2, r1
-	sub r2, 1
-	cmp r6, r2
-	jg .label_35
-.ssa_bb_27:
-	jmp .label_34
-.label_35:
-	sub r6, r1
-	jmp .label_36
-.label_34:
-	mov r6, 0
-.label_36:
-	jmp .label_47
+.ssa_bb_19:
+	cmp r6, 115
+	je .label_45
+.ssa_bb_20:
+	cmp r6, 100
+	je .label_50
+.ssa_bb_21:
+	jmp .label_51
 .label_37:
-	mov r2, r1
-	sub r2, 1
-	cmp r5, r2
+	mov r6, r2
+	sub r6, 1
+	cmp r1, r6
 	jg .label_39
-.ssa_bb_32:
+.ssa_bb_23:
 	jmp .label_38
 .label_39:
-	sub r5, r1
+	sub r1, r2
 	jmp .label_40
 .label_38:
-	mov r5, 0
+	mov r1, 0
 .label_40:
-	jmp .label_47
+	jmp .label_51
 .label_41:
-	add r6, r1
-	mov r1, 24
-	cmp r6, r1
+	mov r6, r2
+	sub r6, 1
+	cmp r5, r6
 	jg .label_43
-.ssa_bb_37:
-	cmp r6, r4
-	jg .label_43
-.ssa_bb_39:
+.ssa_bb_28:
 	jmp .label_42
 .label_43:
-	mov r6, r4
+	sub r5, r2
+	jmp .label_44
 .label_42:
-	jmp .label_47
-.label_46:
-	add r5, r1
-	mov r1, 28
-	cmp r5, r1
-	jg .label_48
-.ssa_bb_44:
-	cmp r5, r3
-	jg .label_48
-.ssa_bb_46:
-	jmp .label_47
-.label_48:
-	mov r5, r3
+	mov r5, 0
+.label_44:
+	jmp .label_51
+.label_45:
+	add r1, r2
+	mov r2, 24
+	cmp r1, r2
+	jg .label_47
+.ssa_bb_33:
+	cmp r1, r4
+	jg .label_47
+.ssa_bb_35:
+	jmp .label_46
 .label_47:
-	jmp .label_93
-.label_29:
-	mov r8, 2
-	cmp r7, r8
-	je .label_52
-.ssa_bb_52:
+	mov r1, r4
+.label_46:
+	jmp .label_51
+.label_50:
+	add r5, r2
+	mov r2, 28
+	cmp r5, r2
+	jg .label_52
+.ssa_bb_40:
+	cmp r5, r3
+	jg .label_52
+.ssa_bb_42:
 	jmp .label_51
 .label_52:
+	mov r5, r3
+.label_51:
+	jmp .label_97
+.label_33:
+	mov r8, 2
+	cmp r7, r8
+	je .label_56
+.ssa_bb_48:
+	jmp .label_55
+.label_56:
 	push r3
 	push r4
 	mov r7, 240
 	push r7
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
-	cmp r2, 116
-	je .label_55
-.ssa_bb_54:
-	cmp r2, 102
-	je .label_60
-.ssa_bb_55:
-	cmp r2, 103
-	je .label_65
-.ssa_bb_56:
-	cmp r2, 104
+	cmp r6, 116
+	je .label_59
+.ssa_bb_50:
+	cmp r6, 102
+	je .label_64
+.ssa_bb_51:
+	cmp r6, 103
 	je .label_69
-.ssa_bb_57:
-	jmp .label_72
-.label_55:
-	sub r4, r1
-	mov r1, 0
-	cmp r4, r1
-	jl .label_57
-.ssa_bb_59:
-	cmp r4, r6
-	jl .label_57
-.ssa_bb_61:
-	jmp .label_56
-.label_57:
-	mov r4, r6
-.label_56:
-	jmp .label_72
-.label_60:
-	sub r3, r1
-	mov r1, 0
-	cmp r3, r1
-	jl .label_62
-.ssa_bb_66:
-	cmp r3, r5
-	jl .label_62
-.ssa_bb_68:
-	jmp .label_61
-.label_62:
-	mov r3, r5
-.label_61:
-	jmp .label_72
-.label_65:
-	mov r2, 24
-	sub r2, r1
+.ssa_bb_52:
+	cmp r6, 104
+	je .label_73
+.ssa_bb_53:
+	jmp .label_76
+.label_59:
+	sub r4, r2
+	mov r2, 0
 	cmp r4, r2
-	jl .label_67
-.ssa_bb_73:
-	jmp .label_66
-.label_67:
-	add r4, r1
-	jmp .label_68
-.label_66:
-	mov r4, 24
-.label_68:
-	jmp .label_72
-.label_69:
-	mov r2, 29
-	sub r2, r1
+	jl .label_61
+.ssa_bb_55:
+	cmp r4, r1
+	jl .label_61
+.ssa_bb_57:
+	jmp .label_60
+.label_61:
+	mov r4, r1
+.label_60:
+	jmp .label_76
+.label_64:
+	sub r3, r2
+	mov r2, 0
 	cmp r3, r2
+	jl .label_66
+.ssa_bb_62:
+	cmp r3, r5
+	jl .label_66
+.ssa_bb_64:
+	jmp .label_65
+.label_66:
+	mov r3, r5
+.label_65:
+	jmp .label_76
+.label_69:
+	mov r6, 24
+	sub r6, r2
+	cmp r4, r6
 	jl .label_71
-.ssa_bb_78:
+.ssa_bb_69:
 	jmp .label_70
 .label_71:
-	add r3, r1
+	add r4, r2
 	jmp .label_72
 .label_70:
-	mov r3, 28
+	mov r4, 24
 .label_72:
-	jmp .label_93
-.label_51:
+	jmp .label_76
+.label_73:
+	mov r6, 29
+	sub r6, r2
+	cmp r3, r6
+	jl .label_75
+.ssa_bb_74:
+	jmp .label_74
+.label_75:
+	add r3, r2
+	jmp .label_76
+.label_74:
+	mov r3, 28
+.label_76:
+	jmp .label_97
+.label_55:
 	mov r8, 3
 	cmp r7, r8
-	je .label_74
-.ssa_bb_84:
-	jmp .label_73
-.label_74:
+	je .label_78
+.ssa_bb_80:
+	jmp .label_77
+.label_78:
 	push r5
-	push r6
+	push r1
 	mov r7, 240
 	push r7
 	call __tptcc_fn_show_cell
@@ -664,168 +722,145 @@ __tptcc_fn_main:
 	push r7
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
-	cmp r2, 105
-	je .label_77
-.ssa_bb_86:
-	cmp r2, 106
+	cmp r6, 105
 	je .label_81
-.ssa_bb_87:
-	cmp r2, 107
+.ssa_bb_82:
+	cmp r6, 106
 	je .label_85
-.ssa_bb_88:
-	cmp r2, 108
+.ssa_bb_83:
+	cmp r6, 107
 	je .label_89
-.ssa_bb_89:
-	jmp .label_92
-.label_77:
-	mov r2, r1
-	sub r2, 1
-	cmp r6, r2
-	jg .label_79
-.ssa_bb_91:
-	jmp .label_78
-.label_79:
-	sub r6, r1
-	sub r4, r1
-	jmp .label_80
-.label_78:
-	sub r4, r6
-	mov r6, 0
-.label_80:
-	jmp .label_92
+.ssa_bb_84:
+	cmp r6, 108
+	je .label_93
+.ssa_bb_85:
+	jmp .label_96
 .label_81:
-	mov r2, r1
-	sub r2, 1
-	cmp r5, r2
+	mov r6, r2
+	sub r6, 1
+	cmp r1, r6
 	jg .label_83
-.ssa_bb_96:
+.ssa_bb_87:
 	jmp .label_82
 .label_83:
-	sub r5, r1
-	sub r3, r1
+	sub r1, r2
+	sub r4, r2
 	jmp .label_84
 .label_82:
-	sub r3, r5
-	mov r5, 0
+	sub r4, r1
+	mov r1, 0
 .label_84:
-	jmp .label_92
+	jmp .label_96
 .label_85:
-	mov r2, 24
-	sub r2, r1
-	cmp r4, r2
-	jl .label_87
-.ssa_bb_101:
+	mov r6, r2
+	sub r6, 1
+	cmp r5, r6
+	jg .label_87
+.ssa_bb_92:
 	jmp .label_86
 .label_87:
-	add r4, r1
-	add r6, r1
+	sub r5, r2
+	sub r3, r2
 	jmp .label_88
 .label_86:
-	sub r4, r6
-	mov r6, 24
-	sub r6, r4
-	mov r4, 24
+	sub r3, r5
+	mov r5, 0
 .label_88:
-	jmp .label_92
+	jmp .label_96
 .label_89:
-	mov r2, 29
-	sub r2, r1
-	cmp r3, r2
+	mov r6, 24
+	sub r6, r2
+	cmp r4, r6
 	jl .label_91
-.ssa_bb_106:
+.ssa_bb_97:
 	jmp .label_90
 .label_91:
-	add r3, r1
-	add r5, r1
+	add r4, r2
+	add r1, r2
 	jmp .label_92
 .label_90:
+	sub r4, r1
+	mov r1, 24
+	sub r1, r4
+	mov r4, 24
+.label_92:
+	jmp .label_96
+.label_93:
+	mov r6, 29
+	sub r6, r2
+	cmp r3, r6
+	jl .label_95
+.ssa_bb_102:
+	jmp .label_94
+.label_95:
+	add r3, r2
+	add r5, r2
+	jmp .label_96
+.label_94:
 	sub r3, r5
 	mov r5, 28
 	sub r5, r3
 	mov r3, 28
-.label_92:
-	jmp .label_93
-.label_73:
-	cmp r2, 109
-	je .label_94
-.ssa_bb_112:
-	jmp .label_93
-.label_94:
-	ld r2, 6666
-	mov r1, 0
-	cmp r2, r1
-	je .label_96
-.ssa_bb_114:
-	jmp .label_95
 .label_96:
-	mov r1, 1
-	st r1, 6666
-	call __tptcc_fn_clear_screen
-	ld r1, 6668
-	push r1
-	mov r1, 2539
-	push r1
-	call __tptcc_fn_draw_map
-	add stack_pointer, 2
 	jmp .label_97
-.label_95:
-	mov r1, 0
-	st r1, 6666
-	call __tptcc_fn_clear_screen
-	ld r1, 6667
+.label_77:
+	cmp r6, 109
+	je .label_98
+.ssa_bb_108:
+	jmp .label_97
+.label_98:
+	ld r6, 6666
+	mov r2, 0
+	cmp r6, r2
+	je .label_100
+.ssa_bb_110:
+	jmp .label_99
+.label_100:
+	mov r2, 1
+	jmp .label_101
+.label_99:
+	mov r2, 0
+.label_101:
+	st r2, 6666
+	call __tptcc_fn_draw_current_map
+	push r5
 	push r1
-	mov r1, 1561
-	push r1
-	call __tptcc_fn_draw_map
-	add stack_pointer, 2
+	mov r2, 10
+	push r2
+	call __tptcc_fn_show_cell
+	add stack_pointer, 3
+	push r3
+	push r4
+	mov r2, 13
+	push r2
+	call __tptcc_fn_show_cell
+	add stack_pointer, 3
 .label_97:
+	push r3
+	push r4
 	push r5
-	push r6
-	mov r1, 10
 	push r1
+	call __tptcc_fn_show_other_corners
+	add stack_pointer, 4
+	push r5
+	push r1
+	mov r2, 10
+	push r2
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
 	push r3
 	push r4
-	mov r1, 13
-	push r1
-	call __tptcc_fn_show_cell
-	add stack_pointer, 3
-.label_93:
-	mov r23, r6
-	mov r24, r5
-	mov r31, r4
-	mov r25, r3
-	mov r22, 0xe0
-	st r22, term_colour
-	mov r22, ' '
-	shl r23, 5
-	add r23, r25
-	st r23, term_cursor
-	st r22, term_print
-	shl r31, 5
-	add r31, r24
-	st r31, term_cursor
-	st r22, term_print
-	push r5
-	push r6
-	mov r1, 10
-	push r1
-	call __tptcc_fn_show_cell
-	add stack_pointer, 3
-	push r3
-	push r4
-	mov r1, 13
-	push r1
+	mov r2, 13
+	push r2
 	call __tptcc_fn_show_cell
 	add stack_pointer, 3
 	push r3
 	push r4
 	push r5
-	push r6
+	push r1
 	call __tptcc_fn_show_population
 	add stack_pointer, 4
-	jmp .label_18
+	jmp .label_22
 .exit_main:
 	hlt
 __tptcc_fn_print_char_array:

@@ -347,6 +347,7 @@ checkExpression node
 checkAssignmentExpression :: Node -> TypeM CType
 checkAssignmentExpression node
   | nodeIs NodeAssignment node = do
+      op <- fieldString "op" node
       lhsNode <- fieldNode "lhs" node
       assignable <- isAssignableExpression lhsNode
       unless assignable $
@@ -356,10 +357,26 @@ checkAssignmentExpression node
         throw ("Cannot assign to " <> renderTypePretty lhs)
       rhsNode <- fieldNode "rhs" node
       rhs <- checkAssignmentExpression rhsNode
-      unless (canAssignFrom rhsNode rhs lhs) $
+      unless (canApplyAssignmentOp op lhs rhsNode rhs) $
         throw ("Cannot assign " <> renderTypePretty rhs <> " to " <> renderTypePretty lhs)
       recordType node lhs
   | otherwise = checkTernaryExpression node
+
+canApplyAssignmentOp :: Text -> CType -> Node -> CType -> Bool
+canApplyAssignmentOp op lhs rhsNode rhs =
+  case op of
+    "=" -> canAssignFrom rhsNode rhs lhs
+    "+=" -> isIntegerType lhs && isIntegerType rhs || isPointerType lhs && isIntegerType rhs
+    "-=" -> isIntegerType lhs && isIntegerType rhs || isPointerType lhs && isIntegerType rhs
+    "*=" -> isIntegerType lhs && isIntegerType rhs
+    "/=" -> isIntegerType lhs && isIntegerType rhs
+    "%=" -> isIntegerType lhs && isIntegerType rhs
+    "&=" -> isIntegerType lhs && isIntegerType rhs
+    "|=" -> isIntegerType lhs && isIntegerType rhs
+    "^=" -> isIntegerType lhs && isIntegerType rhs
+    "<<=" -> isIntegerType lhs && isIntegerType rhs
+    ">>=" -> isIntegerType lhs && isIntegerType rhs
+    _ -> False
 
 checkTernaryExpression :: Node -> TypeM CType
 checkTernaryExpression node

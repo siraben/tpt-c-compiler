@@ -1,6 +1,5 @@
 char board[8][12];
 char __scan_signed_int(int *num) {
-    // Register variables can be more efficiently accessed and updated than local variables
     register char c;
     register int res = 0;
     register int sign = 1;
@@ -22,10 +21,19 @@ char __scan_signed_int(int *num) {
     return c;
 }
 int has_mine[8][12];
-int is_interior[8][12] = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 int digit_colour[9] = {0x77, 0x79, 0x72, 0x7c, 0x71, 0x74, 0x76, 0x75, 0x78};
 int revealed_cells = 0;
-int row_map[96] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7};
+
+int *queue_cell(int *stack_pointer, int row, int col) {
+    if (board[row][col] == 0 || board[row][col] == 'F') {
+        board[row][col] = 0x10;
+        stack_pointer[0] = row;
+        stack_pointer[1] = col;
+        stack_pointer += 2;
+    }
+    return stack_pointer;
+}
+
 void show_bombs() {
     for (register int i = 0; i < 8; i++) {
         for (register int j = 0; j < 12; j++) {
@@ -52,15 +60,15 @@ void sweep_cell(int rowin, int colin) {
         while (1) {}
     }
     int stack[192];
-    register int *stack_pointer = &stack[0];
+    register int *stack_pointer = stack;
     register int revealed_in_sweep = 0;
     stack_pointer[0] = row;
     stack_pointer[1] = col;
-    stack_pointer = stack_pointer + 2;
+    stack_pointer += 2;
     while ((int)stack_pointer > (int)stack) {
         row = stack_pointer[-2];
         col = stack_pointer[-1];
-        stack_pointer = stack_pointer - 2;
+        stack_pointer -= 2;
         register int num_mines = has_mine[row][col];
         register int temp_char = num_mines + '0';
         board[row][col] = temp_char;
@@ -73,110 +81,28 @@ void sweep_cell(int rowin, int colin) {
             register int col_minus_one = col - 1;
             register int row_plus_one = row + 1;
             register int col_plus_one = col + 1;
-            // Verbosity is for optimization reasons
-            // Macros would greatly help here
-            // Checks for interior cells (hot path)
-            if (is_interior[row][col]) {
-                if (board[row_minus_one][col_minus_one] == 0 || board[row_minus_one][col_minus_one] == 'F') {
-                    board[row_minus_one][col_minus_one] = 0x10;
-                    stack_pointer[0] = row_minus_one;
-                    stack_pointer[1] = col_minus_one;
-                    stack_pointer = stack_pointer + 2;
+            if (row > 0) {
+                if (col > 0) {
+                    stack_pointer = queue_cell(stack_pointer, row_minus_one, col_minus_one);
                 }
-                if (board[row_minus_one][col_plus_one] == 0 || board[row_minus_one][col_plus_one] == 'F') {
-                    board[row_minus_one][col_plus_one] = 0x10;
-                    stack_pointer[0] = row_minus_one;
-                    stack_pointer[1] = col_plus_one;
-                    stack_pointer = stack_pointer + 2;
+                stack_pointer = queue_cell(stack_pointer, row_minus_one, col);
+                if (col < 11) {
+                    stack_pointer = queue_cell(stack_pointer, row_minus_one, col_plus_one);
                 }
-                if (board[row_plus_one][col_minus_one] == 0 || board[row_plus_one][col_minus_one] == 'F') {
-                    board[row_plus_one][col_minus_one] = 0x10;
-                    stack_pointer[0] = row_plus_one;
-                    stack_pointer[1] = col_minus_one;
-                    stack_pointer = stack_pointer + 2;
+            }
+            if (col > 0) {
+                stack_pointer = queue_cell(stack_pointer, row, col_minus_one);
+            }
+            if (col < 11) {
+                stack_pointer = queue_cell(stack_pointer, row, col_plus_one);
+            }
+            if (row < 7) {
+                if (col > 0) {
+                    stack_pointer = queue_cell(stack_pointer, row_plus_one, col_minus_one);
                 }
-                if (board[row_plus_one][col_plus_one] == 0 || board[row_plus_one][col_plus_one] == 'F') {
-                    board[row_plus_one][col_plus_one] = 0x10;
-                    stack_pointer[0] = row_plus_one;
-                    stack_pointer[1] = col_plus_one;
-                    stack_pointer = stack_pointer + 2;
-                }
-                if (board[row][col_minus_one] == 0 || board[row][col_minus_one] == 'F') {
-                    board[row][col_minus_one] = 0x10;
-                    stack_pointer[0] = row;
-                    stack_pointer[1] = col_minus_one;
-                    stack_pointer = stack_pointer + 2;
-                }
-                if (board[row][col_plus_one] == 0 || board[row][col_plus_one] == 'F') {
-                    board[row][col_plus_one] = 0x10;
-                    stack_pointer[0] = row;
-                    stack_pointer[1] = col_plus_one;
-                    stack_pointer = stack_pointer + 2;
-                }
-                if (board[row_plus_one][col] == 0 || board[row_plus_one][col] == 'F') {
-                    board[row_plus_one][col] = 0x10;
-                    stack_pointer[0] = row_plus_one;
-                    stack_pointer[1] = col;
-                    stack_pointer = stack_pointer + 2;
-                }
-                if (board[row_minus_one][col] == 0 || board[row_minus_one][col] == 'F') {
-                    board[row_minus_one][col] = 0x10;
-                    stack_pointer[0] = row_minus_one;
-                    stack_pointer[1] = col;
-                    stack_pointer = stack_pointer + 2;
-                }
-            } else {
-                if (row > 0) {
-                    if (col > 0 && (board[row_minus_one][col_minus_one] == 0 || board[row_minus_one][col_minus_one] == 'F')) {
-                        board[row_minus_one][col_minus_one] = 0x10;
-                        stack_pointer[0] = row_minus_one;
-                        stack_pointer[1] = col_minus_one;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                    if (col < 11 && (board[row_minus_one][col_plus_one] == 0 || board[row_minus_one][col_plus_one] == 'F')) {
-                        board[row_minus_one][col_plus_one] = 0x10;
-                        stack_pointer[0] = row_minus_one;
-                        stack_pointer[1] = col_plus_one;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                    if (board[row_minus_one][col] == 0 || board[row_minus_one][col] == 'F') {
-                        board[row_minus_one][col] = 0x10;
-                        stack_pointer[0] = row_minus_one;
-                        stack_pointer[1] = col;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                }
-                if (row < 7) {
-                    if (col > 0 && (board[row_plus_one][col_minus_one] == 0 || board[row_plus_one][col_minus_one] == 'F')) {
-                        board[row_plus_one][col_minus_one] = 0x10;
-                        stack_pointer[0] = row_plus_one;
-                        stack_pointer[1] = col_minus_one;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                    if (col < 11 && (board[row_plus_one][col_plus_one] == 0 || board[row_plus_one][col_plus_one] == 'F')) {
-                        board[row_plus_one][col_plus_one] = 0x10;
-                        stack_pointer[0] = row_plus_one;
-                        stack_pointer[1] = col_plus_one;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                    if (board[row_plus_one][col] == 0 || board[row_plus_one][col] == 'F') {
-                        board[row_plus_one][col] = 0x10;
-                        stack_pointer[0] = row_plus_one;
-                        stack_pointer[1] = col;
-                        stack_pointer = stack_pointer + 2;
-                    }
-                }
-                if (col > 0 && (board[row][col_minus_one] == 0 || board[row][col_minus_one] == 'F')) {
-                    board[row][col_minus_one] = 0x10;
-                    stack_pointer[0] = row;
-                    stack_pointer[1] = col_minus_one;
-                    stack_pointer = stack_pointer + 2;
-                }
-                if (col < 11 && (board[row][col_plus_one] == 0 || board[row][col_plus_one] == 'F')) {
-                    board[row][col_plus_one] = 0x10;
-                    stack_pointer[0] = row;
-                    stack_pointer[1] = col_plus_one;
-                    stack_pointer = stack_pointer + 2;
+                stack_pointer = queue_cell(stack_pointer, row_plus_one, col);
+                if (col < 11) {
+                    stack_pointer = queue_cell(stack_pointer, row_plus_one, col_plus_one);
                 }
             }
         }
@@ -246,38 +172,9 @@ int main(void) {
             candidate = rnum & 127;
         }
         ((int *)(has_mine_base + candidate))[0] += 9;
-        // update has_mine map
-        register int row = row_map[candidate];
-        register int col = candidate - row * 12;
-        register int row_minus_one = row - 1;
-        register int col_minus_one = col - 1;
-        register int row_plus_one = row + 1;
-        register int col_plus_one = col + 1;
-        // Optimized away function call to add_to_surrounding_cells()
-        if (row > 0) {
-            if (col > 0) {
-                has_mine[row_minus_one][col_minus_one] += 1;
-            }
-            has_mine[row_minus_one][col] += 1;
-            if (col < 11) {
-                has_mine[row_minus_one][col_plus_one] += 1;
-            }
-        }
-        if (col > 0) {
-            has_mine[row][col_minus_one] += 1;
-        }
-        if (col < 11) {
-            has_mine[row][col_plus_one] += 1;
-        }
-        if (row < 7) {
-            if (col > 0) {
-                has_mine[row_plus_one][col_minus_one] += 1;
-            }
-            has_mine[row_plus_one][col] += 1;
-            if (col < 11) {
-                has_mine[row_plus_one][col_plus_one] += 1;
-            }
-        }
+        register int row = candidate / 12;
+        register int col = candidate % 12;
+        add_to_surrounding_cells(row, col, 1);
         putchar('.');
     }
     has_mine[0][0] -= 9;

@@ -10,6 +10,19 @@ enum MapID {US_EAST, US_WEST};
 enum MapID map_id = US_EAST;
 int US_EAST_MAP_SIZE = 978;
 int US_WEST_MAP_SIZE = 801;
+
+int *current_map_data() {
+    return map_id == US_EAST ? us_east_map_data : us_west_map_data;
+}
+
+int *current_segment_map() {
+    return map_id == US_EAST ? us_east_segment_map : us_west_segment_map;
+}
+
+int current_map_size() {
+    return map_id == US_EAST ? US_EAST_MAP_SIZE : US_WEST_MAP_SIZE;
+}
+
 void draw_map(int *map_address, int size) {
     set_text_colour(0xf0);
     asm(
@@ -102,94 +115,62 @@ void show_population(int min_r, int min_c, int max_r, int max_c) {
 }
 void clear_screen() {
     set_text_colour(0x0f);
-    asm(
-        "mov r1, 29"
-        "mov r2, ' '"
-        "clear_screen_loop:"
-        "cmp r1, 0"
-        "je end_clear_screen_loop"
-        "sub r1, 1"
-        "st r2, 0x9FA4"
-        "jmp clear_screen_loop"
-        "end_clear_screen_loop:"
-        :
-        :
-        :r1, r2
-    );
+    set_cursor(0, 0);
+    for (register int i = 0; i < 29; ++i) {
+        putchar(' ');
+    }
     set_cursor(25, 0);
     __print_char_array("POPULATION: \n\n\n");
     __print_char_array("COUNTRY: ");
     set_cursor(0, 0);
 }
+void draw_current_map() {
+    clear_screen();
+    draw_map(current_map_data(), current_map_size());
+}
+void show_blank_cell(int colour, int r, int c) {
+    set_cursor(r, c);
+    set_text_colour(colour << 4);
+    putchar(' ');
+}
+void show_corner(int colour, int r, int c) {
+    set_cursor(r, c);
+    set_text_colour(colour);
+    putchar(' ');
+}
+void show_other_corners(int start_r, int start_c, int end_r, int end_c) {
+    show_corner(0xe0, start_r, end_c);
+    show_corner(0xe0, end_r, start_c);
+}
 void show_cell(int colour, int r, int c) {
     set_cursor(r, c);
     set_text_colour(colour);
-    if (map_id == US_EAST) {
-        register int segment = us_east_segment_map[r * 29 + c];
-        register int map_address = (int)us_east_map_data;
-        // int zero_char_left, zero_char_right;
-        if (segment != 8192) {
-            asm(
-                "mull r22, 3"
-                "add r24, r22, r23"
-                "ld r23, r24, 1"
-                "st r23, term_print_e"
-                "ld r24, r24, 2"
-                "st r24, term_print_o"
-                "st r0, term_print"
-            :r22=segment, r23=map_address);
-        } else {
-            set_text_colour(colour << 4);
-            putchar(' ');
-        }
+    register int *segment_map = current_segment_map();
+    register int segment = segment_map[r * 29 + c];
+    if (segment != 8192) {
+        register int map_address = (int)current_map_data();
+        asm(
+            "mull r22, 3"
+            "add r24, r22, r23"
+            "ld r23, r24, 1"
+            "st r23, term_print_e"
+            "ld r24, r24, 2"
+            "st r24, term_print_o"
+            "st r0, term_print"
+        :r22=segment, r23=map_address);
     } else {
-        register int segment = us_west_segment_map[r * 29 + c];
-        register int map_address = (int)us_west_map_data;
-        // int zero_char_left, zero_char_right;
-        if (segment != 8192) {
-            asm(
-                "mull r22, 3"
-                "add r24, r22, r23"
-                "ld r23, r24, 1"
-                "st r23, term_print_e"
-                "ld r24, r24, 2"
-                "st r24, term_print_o"
-                "st r0, term_print"
-            :r22=segment, r23=map_address);
-        } else {
-            set_text_colour(colour << 4);
-            putchar(' ');
-        }
+        show_blank_cell(colour, r, c);
     }
 }
 enum Cursors {NONE, TOP_LEFT, BOTTOM_RIGHT, BOTH};
 int cursor_map[26] = {1, 0, 0, 1, 0, 2, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0};
 int main(void) {
-    clear_screen();
-    if (map_id == US_EAST) {
-        draw_map(us_east_map_data, US_EAST_MAP_SIZE);
-    } else {
-        draw_map(us_west_map_data, US_WEST_MAP_SIZE);
-    }
+    draw_current_map();
     register int start_r = 9, start_c = 9;
     register int end_r = 17, end_c = 20;
     show_cell(0x0a, start_r, start_c);
     show_cell(0x0d, end_r, end_c);
-    // draw the other corners
-    asm(
-        "mov r22, 0xe0"
-        "st r22, term_colour"
-        "mov r22, ' '"
-        "shl r23, 5"
-        "add r23, r25"
-        "st r23, term_cursor"
-        "st r22, term_print"
-        "shl r31, 5"
-        "add r31, r24"
-        "st r31, term_cursor"
-        "st r22, term_print"
-        :r23=start_r, r24=start_c, r31=end_r, r25=end_c
-    );
+    show_other_corners(start_r, start_c, end_r, end_c);
     show_population(start_r, start_c, end_r, end_c);
     while (1) {
         register char command = getchar();
@@ -314,35 +295,14 @@ int main(void) {
         } else {
             switch (command) {
                 case 'm':
-                    if (map_id == US_EAST) {
-                        map_id = US_WEST;
-                        clear_screen();
-                        draw_map(us_west_map_data, US_WEST_MAP_SIZE);
-                    } else {
-                        map_id = US_EAST;
-                        clear_screen();
-                        draw_map(us_east_map_data, US_EAST_MAP_SIZE);
-                    }
+                    map_id = map_id == US_EAST ? US_WEST : US_EAST;
+                    draw_current_map();
                     show_cell(0x0a, start_r, start_c);
                     show_cell(0x0d, end_r, end_c);
                     break;
             }
         }
-        // draw the other corners
-        asm(
-            "mov r22, 0xe0"
-            "st r22, term_colour"
-            "mov r22, ' '"
-            "shl r23, 5"
-            "add r23, r25"
-            "st r23, term_cursor"
-            "st r22, term_print"
-            "shl r31, 5"
-            "add r31, r24"
-            "st r31, term_cursor"
-            "st r22, term_print"
-            :r23=start_r, r24=start_c, r31=end_r, r25=end_c
-        );
+        show_other_corners(start_r, start_c, end_r, end_c);
         show_cell(0x0a, start_r, start_c);
         show_cell(0x0d, end_r, end_c);
         show_population(start_r, start_c, end_r, end_c);
