@@ -530,15 +530,6 @@ rowOf = row . nodePos
 colOf :: Node -> Int
 colOf = col . nodePos
 
-applyPointers :: Integer -> CType -> CType
-applyPointers count ty
-  | count <= 0 = ty
-  | otherwise = applyPointers (count - 1) (pointer ty)
-
-decayArrayParameter :: CType -> CType
-decayArrayParameter (ArrayType _ target) = pointer target
-decayArrayParameter ty = ty
-
 lookupOrdinary :: Text -> IRM (Maybe IRSymbol)
 lookupOrdinary name = Map.lookup name . ordinarySymbols <$> State.get
 

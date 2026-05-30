@@ -357,26 +357,27 @@ checkAssignmentExpression node
         throw ("Cannot assign to " <> renderTypePretty lhs)
       rhsNode <- fieldNode "rhs" node
       rhs <- checkAssignmentExpression rhsNode
-      unless (canApplyAssignmentOp op lhs rhsNode rhs) $
-        throw ("Cannot assign " <> renderTypePretty rhs <> " to " <> renderTypePretty lhs)
+      checkAssignmentCompatibility op lhs rhsNode rhs
       recordType node lhs
   | otherwise = checkTernaryExpression node
 
-canApplyAssignmentOp :: Text -> CType -> Node -> CType -> Bool
-canApplyAssignmentOp op lhs rhsNode rhs =
+checkAssignmentCompatibility :: Text -> CType -> Node -> CType -> TypeM ()
+checkAssignmentCompatibility op lhs rhsNode rhs =
   case op of
-    "=" -> canAssignFrom rhsNode rhs lhs
-    "+=" -> isIntegerType lhs && isIntegerType rhs || isPointerType lhs && isIntegerType rhs
-    "-=" -> isIntegerType lhs && isIntegerType rhs || isPointerType lhs && isIntegerType rhs
-    "*=" -> isIntegerType lhs && isIntegerType rhs
-    "/=" -> isIntegerType lhs && isIntegerType rhs
-    "%=" -> isIntegerType lhs && isIntegerType rhs
-    "&=" -> isIntegerType lhs && isIntegerType rhs
-    "|=" -> isIntegerType lhs && isIntegerType rhs
-    "^=" -> isIntegerType lhs && isIntegerType rhs
-    "<<=" -> isIntegerType lhs && isIntegerType rhs
-    ">>=" -> isIntegerType lhs && isIntegerType rhs
-    _ -> False
+    "=" ->
+      unless (canAssignFrom rhsNode rhs lhs) $
+        throw ("Cannot assign " <> renderTypePretty rhs <> " to " <> renderTypePretty lhs)
+    "+=" -> void (sumResultType "+" lhs rhs)
+    "-=" -> void (sumResultType "-" lhs rhs)
+    "*=" -> void (integerArithmeticResultType lhs rhs)
+    "/=" -> void (integerArithmeticResultType lhs rhs)
+    "%=" -> void (integerArithmeticResultType lhs rhs)
+    "&=" -> void (integerArithmeticResultType lhs rhs)
+    "|=" -> void (integerArithmeticResultType lhs rhs)
+    "^=" -> void (integerArithmeticResultType lhs rhs)
+    "<<=" -> void (shiftResultType "<<" lhs rhs)
+    ">>=" -> void (shiftResultType ">>" lhs rhs)
+    _ -> throw ("Unsupported assignment operator: " <> op)
 
 checkTernaryExpression :: Node -> TypeM CType
 checkTernaryExpression node
@@ -477,22 +478,9 @@ foldTokenExpression node subChecker combine =
 checkSumExpression :: Node -> TypeM CType
 checkSumExpression node
   | nodeIs NodeSumExpression node = do
-      ty <-
-        case nodeChildren node of
-          ChildNode firstNode : rest -> do
-            firstTy <- checkTerm firstNode
-            foldSumExpression (decayExpressionType firstTy) rest
-          _ -> throw "malformed sum expression"
+      ty <- foldTokenExpression node checkTerm sumResultType
       recordType node ty
   | otherwise = checkTerm node
-
-foldSumExpression :: CType -> [NodeChild] -> TypeM CType
-foldSumExpression acc [] = pure acc
-foldSumExpression acc (ChildToken token : ChildNode rhsNode : rest) = do
-  rhs <- decayExpressionType <$> checkTerm rhsNode
-  result <- sumResultType (tokenName token) acc rhs
-  foldSumExpression result rest
-foldSumExpression _ _ = throw "malformed sum expression"
 
 sumResultType :: Text -> CType -> CType -> TypeM CType
 sumResultType op lhs rhs
@@ -707,29 +695,6 @@ emptyArgumentList =
     , nodeFields = []
     }
 
-decayExpressionType :: CType -> CType
-decayExpressionType ty =
-  case ty of
-    ArrayType _ target -> pointer target
-    FunctionType {} -> pointer ty
-    _ -> ty
-
-isScalarType :: CType -> Bool
-isScalarType ty = isIntegerType ty || isPointerType ty
-
-isPointerType :: CType -> Bool
-isPointerType PointerType {} = True
-isPointerType _ = False
-
-compatiblePointerTypes :: CType -> CType -> Bool
-compatiblePointerTypes (PointerType lhs) (PointerType rhs) = compatiblePointerTargets lhs rhs
-compatiblePointerTypes _ _ = False
-
-compatiblePointerTargets :: CType -> CType -> Bool
-compatiblePointerTargets (BaseType Void _) _ = True
-compatiblePointerTargets _ (BaseType Void _) = True
-compatiblePointerTargets lhs rhs = sameTypeChain lhs rhs True
-
 isNullPointerConstant :: Node -> Bool
 isNullPointerConstant node =
   case nodeKind node of
@@ -805,13 +770,6 @@ memberAccessType ty op =
         Just found -> found
         Nothing -> ty
 
-dereferenceType :: CType -> CType
-dereferenceType ty =
-  case ty of
-    PointerType target -> target
-    ArrayType _ target -> target
-    _ -> ty
-
 firstMaybe :: [a] -> Maybe a
 firstMaybe [] = Nothing
 firstMaybe (value : _) = Just value
@@ -827,17 +785,6 @@ nextBlockId = do
   let current = blockCounter st
   State.modify (\s -> s {blockCounter = current + 1})
   pure current
-
-decayArrayParameter :: CType -> CType
-decayArrayParameter ty =
-  case ty of
-    ArrayType _ target -> pointer target
-    _ -> ty
-
-applyPointers :: Integer -> CType -> CType
-applyPointers count ty
-  | count <= 0 = ty
-  | otherwise = applyPointers (count - 1) (pointer ty)
 
 enterScope :: Text -> TypeM ()
 enterScope name = do

@@ -7,9 +7,18 @@ module Tptcc.CType
   , baseFromSpecifiers
   , isBaseSpecifiers
   , isIntegerType
+  , isPointerType
+  , isScalarType
   , integerPromotion
   , usualArithmeticConversion
   , defaultArgumentPromotion
+  , applyPointers
+  , decayArrayParameter
+  , decayExpressionType
+  , dereferenceType
+  , dereferenceTypeMaybe
+  , compatiblePointerTargets
+  , compatiblePointerTypes
   , pointer
   , array
   , function
@@ -117,6 +126,13 @@ isIntegerType ty =
     EnumType {} -> True
     _ -> False
 
+isPointerType :: CType -> Bool
+isPointerType PointerType {} = True
+isPointerType _ = False
+
+isScalarType :: CType -> Bool
+isScalarType ty = isIntegerType ty || isPointerType ty
+
 integerPromotion :: CType -> Maybe CType
 integerPromotion ty =
   case ty of
@@ -135,6 +151,41 @@ usualArithmeticConversion lhs rhs = do
 
 defaultArgumentPromotion :: CType -> CType
 defaultArgumentPromotion ty = fromMaybe ty (integerPromotion ty)
+
+applyPointers :: Integer -> CType -> CType
+applyPointers count ty
+  | count <= 0 = ty
+  | otherwise = applyPointers (count - 1) (pointer ty)
+
+decayArrayParameter :: CType -> CType
+decayArrayParameter (ArrayType _ target) = pointer target
+decayArrayParameter ty = ty
+
+decayExpressionType :: CType -> CType
+decayExpressionType ty =
+  case ty of
+    ArrayType _ target -> pointer target
+    FunctionType {} -> pointer ty
+    _ -> ty
+
+dereferenceTypeMaybe :: CType -> Maybe CType
+dereferenceTypeMaybe ty =
+  case ty of
+    PointerType target -> Just target
+    ArrayType _ target -> Just target
+    _ -> Nothing
+
+dereferenceType :: CType -> CType
+dereferenceType ty = fromMaybe ty (dereferenceTypeMaybe ty)
+
+compatiblePointerTargets :: CType -> CType -> Bool
+compatiblePointerTargets (BaseType Void _) _ = True
+compatiblePointerTargets _ (BaseType Void _) = True
+compatiblePointerTargets lhs rhs = sameTypeChain lhs rhs True
+
+compatiblePointerTypes :: CType -> CType -> Bool
+compatiblePointerTypes (PointerType lhs) (PointerType rhs) = compatiblePointerTargets lhs rhs
+compatiblePointerTypes _ _ = False
 
 combinePromotedIntegers :: CType -> CType -> Maybe CType
 combinePromotedIntegers lhs rhs =

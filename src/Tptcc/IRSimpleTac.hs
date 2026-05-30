@@ -21,7 +21,7 @@ import qualified Effectful.Error.Static as Error
 import qualified Effectful.State.Static.Local as State
 
 import Tptcc.Ast
-import Tptcc.CType (CType (..), Member (..), TypeKind (..), array, base, baseFromSpecifiers, baseWithSigned, enum, function, integerPromotion, isBaseSpecifiers, memberByName, pointer, sizeof, struct, union, usualArithmeticConversion, variadicFunction, withMemberOffsets)
+import Tptcc.CType (CType (..), Member (..), TypeKind (..), applyPointers, array, base, baseFromSpecifiers, baseWithSigned, decayArrayParameter, decayExpressionType, dereferenceType, dereferenceTypeMaybe, enum, function, integerPromotion, isBaseSpecifiers, memberByName, pointer, sizeof, struct, union, usualArithmeticConversion, variadicFunction, withMemberOffsets)
 import Tptcc.NodeFields
 import Tptcc.NodeFields.Effectful
 import Tptcc.Operand (Operand (..), OperandValue (..))
@@ -1514,13 +1514,6 @@ postfixNodeValue op =
     Just (NodeRef node) -> Just node
     _ -> Nothing
 
-decayExpressionType :: CType -> CType
-decayExpressionType ty =
-  case ty of
-    ArrayType _ target -> pointer target
-    FunctionType {} -> pointer ty
-    _ -> ty
-
 isRValue :: Place -> Bool
 isRValue place = placeType place `elem` ["i", "t", "r", "vr"]
 
@@ -1598,17 +1591,6 @@ dimensionsOf ty =
   case ty of
     ArrayType len target -> len : dimensionsOf target
     _ -> []
-
-dereferenceTypeMaybe :: CType -> Maybe CType
-dereferenceTypeMaybe ty =
-  case ty of
-    PointerType target -> Just target
-    ArrayType _ target -> Just target
-    _ -> Nothing
-
-dereferenceType :: CType -> CType
-dereferenceType ty =
-  fromMaybe ty (dereferenceTypeMaybe ty)
 
 declaratorDimensions :: Node -> TacM [Integer]
 declaratorDimensions declarator = do
@@ -1759,17 +1741,6 @@ buildParameterType parameter = do
   case fieldNodeMaybe "declarator" parameter of
     Just declarator -> decayArrayParameter <$> buildDeclaratorType declarator baseTy
     Nothing -> pure baseTy
-
-applyPointers :: Integer -> CType -> CType
-applyPointers count ty
-  | count <= 0 = ty
-  | otherwise = applyPointers (count - 1) (pointer ty)
-
-decayArrayParameter :: CType -> CType
-decayArrayParameter ty =
-  case ty of
-    ArrayType _ target -> pointer target
-    _ -> ty
 
 declaratorDimensionsWithInitializer :: Maybe Node -> Node -> TacM [Integer]
 declaratorDimensionsWithInitializer initializer declarator = do
