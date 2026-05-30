@@ -4,12 +4,14 @@ module Tptcc.Tac
   , InstrType (..)
   , MethodOutput (..)
   , Place (..)
+  , PlaceKind (..)
   , TacProgram (..)
   , fieldPlace
   , fieldString
   , instrMnemonic
   , isJumpInstruction
   , isVirtualRegister
+  , placeKindCode
   , placeInteger
   , placeIntegerMaybe
   , placeKey
@@ -27,10 +29,33 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 
 data Place = Place
-  { placeType :: Text
+  { placeKind :: PlaceKind
   , placeValue :: Text
   }
   deriving (Eq, Show)
+
+data PlaceKind
+  = Immediate
+  | Register
+  | Global
+  | Local
+  | Parameter
+  | Temporary
+  | PointerRegister
+  | VirtualRegister
+  deriving stock (Eq, Ord, Show)
+
+placeKindCode :: PlaceKind -> Text
+placeKindCode kind =
+  case kind of
+    Immediate -> "i"
+    Register -> "r"
+    Global -> "g"
+    Local -> "l"
+    Parameter -> "p"
+    Temporary -> "t"
+    PointerRegister -> "pr"
+    VirtualRegister -> "vr"
 
 data Instr = Instr
   { instrType :: InstrType
@@ -113,7 +138,7 @@ fieldPlace :: InstrFieldName -> Instr -> Place
 fieldPlace name instr =
   case lookup name (instrFields instr) of
     Just place -> place
-    Nothing -> Place "i" "0"
+    Nothing -> Place Immediate "0"
 
 fieldString :: InstrFieldName -> Instr -> Text
 fieldString name instr =
@@ -167,7 +192,7 @@ isJumpInstruction instr =
   instr `elem` [IJa, IJae, IJb, IJbe, IJe, IJg, IJge, IJl, IJle, IJmp, IJne]
 
 isVirtualRegister :: Place -> Bool
-isVirtualRegister place = placeType place `elem` ["t", "pr", "vr"]
+isVirtualRegister place = placeKind place `elem` [Temporary, PointerRegister, VirtualRegister]
 
 placeInteger :: Place -> Integer
 placeInteger place =
@@ -183,13 +208,13 @@ textIntegerMaybe value =
     Right (number, rest) | Text.null rest -> Just number
     _ -> Nothing
 
-placeKey :: Place -> Maybe (Text, Text)
+placeKey :: Place -> Maybe (PlaceKind, Text)
 placeKey place
-  | isVirtualRegister place = Just (placeType place, placeValue place)
+  | isVirtualRegister place = Just (placeKind place, placeValue place)
   | otherwise = Nothing
 
 renderPlace :: Place -> Text
-renderPlace place = placeType place <> ":" <> placeValue place
+renderPlace place = placeKindCode (placeKind place) <> ":" <> placeValue place
 
 uniqueInOrder :: Ord a => [a] -> [a]
 uniqueInOrder = go Set.empty
@@ -202,7 +227,7 @@ uniqueInOrder = go Set.empty
 uniquePlaces :: [Place] -> [Place]
 uniquePlaces = go Set.empty
   where
-    key place = (placeType place, placeValue place)
+    key place = (placeKind place, placeValue place)
     go _ [] = []
     go seen (place : rest)
       | key place `Set.member` seen = go seen rest

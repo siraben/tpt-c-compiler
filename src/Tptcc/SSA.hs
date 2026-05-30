@@ -94,7 +94,7 @@ data RenameState = RenameState
   }
   deriving (Eq, Show)
 
-type SSAPlaceKey = (Text, Text, Integer)
+type SSAPlaceKey = (PlaceKind, Text, Integer)
 type EdgeCopies = Map.Map BlockId (Map.Map BlockId [Instr])
 
 dumpSSA :: Node -> Either String [String]
@@ -749,13 +749,13 @@ ssaDefFieldNames instr =
       | otherwise -> ["dest"]
 
 isDirectStackPlace :: Place -> Bool
-isDirectStackPlace place = placeType place `elem` ["l", "p"]
+isDirectStackPlace place = placeKind place `elem` [Local, Parameter]
 
 isSSAPlace :: Place -> Bool
-isSSAPlace place = placeType place `elem` ["t", "vr", "pr", "l", "p"]
+isSSAPlace place = placeKind place `elem` [Temporary, VirtualRegister, PointerRegister, Local, Parameter]
 
 isRegisterSSAPlace :: Place -> Bool
-isRegisterSSAPlace place = placeType place `elem` ["t", "vr", "pr"]
+isRegisterSSAPlace place = placeKind place `elem` [Temporary, VirtualRegister, PointerRegister]
 
 lowerMethodSSA :: MethodOutput -> MethodOutput
 lowerMethodSSA method =
@@ -774,7 +774,7 @@ lowerSSAMethod method =
 
     labelForBlock block
       | ssaBlockId block == "entry" = []
-      | otherwise = [Instr ILabel [("target", Place "i" (ssaBlockId block))] []]
+      | otherwise = [Instr ILabel [("target", Place Immediate (ssaBlockId block))] []]
 
     lowerBlockCode block copiesFromBlock =
       case reverse loweredCode of
@@ -790,7 +790,7 @@ lowerSSAMethod method =
                   (terminal', targetSplits) = splitConditionalTarget terminal target (copiesFor target)
                   fallthroughJump =
                     case fallthrough of
-                      Just succId -> [Instr IJmp [("target", Place "i" (splitOrOriginalTarget succId (copiesFor succId)))] []]
+                      Just succId -> [Instr IJmp [("target", Place Immediate (splitOrOriginalTarget succId (copiesFor succId)))] []]
                       Nothing -> []
                   fallthroughSplits =
                     case fallthrough of
@@ -813,9 +813,9 @@ lowerSSAMethod method =
         splitBlock succId copies
           | null copies = []
           | otherwise =
-              [Instr ILabel [("target", Place "i" (splitLabel succId))] []]
+              [Instr ILabel [("target", Place Immediate (splitLabel succId))] []]
                 <> copies
-                <> [Instr IJmp [("target", Place "i" succId)] []]
+                <> [Instr IJmp [("target", Place Immediate succId)] []]
         splitConditionalTarget terminal target copies
           | null copies = (terminal, [])
           | otherwise =
@@ -827,7 +827,7 @@ lowerSSAMethod method =
       map
         ( \(name, place) ->
             if name == "target"
-              then (name, Place "i" target)
+              then (name, Place Immediate target)
               else (name, place)
         )
 
@@ -864,10 +864,10 @@ ssaPlaceKey place
        in Just (ty, value, version)
   | otherwise = Nothing
 
-ssaVariableKey :: Place -> (Text, Text)
+ssaVariableKey :: Place -> (PlaceKind, Text)
 ssaVariableKey place
-  | placeType place == "pr" = ("t", placeValue place)
-  | otherwise = (placeType place, placeValue place)
+  | placeKind place == PointerRegister = (Temporary, placeValue place)
+  | otherwise = (placeKind place, placeValue place)
 
 lowerSSAPlace :: Map.Map SSAPlaceKey Place -> SSAPlace -> Place
 lowerSSAPlace placeMap place =
@@ -876,7 +876,7 @@ lowerSSAPlace placeMap place =
     Nothing
       | isRegisterSSAPlace (ssaPlaceBase place)
       , ssaPlaceVersion place == Just 0 ->
-          Place "i" "0"
+          Place Immediate "0"
       | otherwise -> ssaPlaceBase place
 
 ssaEdgeCopies :: Map.Map SSAPlaceKey Place -> SSAMethod -> EdgeCopies
@@ -1010,7 +1010,7 @@ prettySSAPlace place =
     <> maybe mempty (\version -> textDoc "#" <> PP.pretty (show version)) (ssaPlaceVersion place)
 
 prettyPlace :: Place -> PP.Doc ann
-prettyPlace place = PP.pretty (placeType place) <> textDoc ":" <> PP.pretty (placeValue place)
+prettyPlace place = PP.pretty (placeKindCode (placeKind place)) <> textDoc ":" <> PP.pretty (placeValue place)
 
 commaSepDocs :: [PP.Doc ann] -> PP.Doc ann
 commaSepDocs = PP.hcat . PP.punctuate (textDoc ",")

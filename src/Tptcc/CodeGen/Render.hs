@@ -70,32 +70,32 @@ isBinaryInstruction instr =
 
 renderCallTarget :: Place -> Text
 renderCallTarget place
-  | placeType place == "i" = placeValue place
+  | placeKind place == Immediate = placeValue place
   | otherwise = asReg place
 
 renderImmediateOrReg :: Place -> Text
 renderImmediateOrReg place
-  | placeType place == "i" = placeValue place
+  | placeKind place == Immediate = placeValue place
   | otherwise = asReg place
 
 renderImmediateOrMemory :: CodeGenOptions -> Integer -> Place -> Text
 renderImmediateOrMemory options localSize place
-  | placeType place == "i" = placeValue place
+  | placeKind place == Immediate = placeValue place
   | otherwise = asMemory options localSize place
 
 asMemory :: CodeGenOptions -> Integer -> Place -> Text
 asMemory options localSize place =
-  case placeType place of
-    "g" -> Text.pack (show (codeGenGlobalAddr options + placeInteger place))
-    "l" -> "base_pointer, " <> Text.pack (show (placeInteger place + 1))
-    "p" -> "base_pointer, " <> Text.pack (show (localSize + placeInteger place + 2))
-    "i" -> placeValue place
+  case placeKind place of
+    Global -> Text.pack (show (codeGenGlobalAddr options + placeInteger place))
+    Local -> "base_pointer, " <> Text.pack (show (placeInteger place + 1))
+    Parameter -> "base_pointer, " <> Text.pack (show (localSize + placeInteger place + 2))
+    Immediate -> placeValue place
     _ -> asReg place
 
 asReg :: Place -> Text
 asReg place =
-  case placeType place of
-    "r"
+  case placeKind place of
+    Register
       | Text.all isDigit (placeValue place) -> "r" <> placeValue place
       | otherwise -> placeValue place
     _ -> "r" <> placeValue place

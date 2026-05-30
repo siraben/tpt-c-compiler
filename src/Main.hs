@@ -20,6 +20,7 @@ import qualified Tptcc.Parser as Parser
 import Tptcc.Preprocessor (preprocessFile)
 import Tptcc.SSA (dumpSSA)
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
+import Tptcc.Tac (placeKindCode)
 import Tptcc.Token (SourcePos (..), Token (..), TokenValue (..))
 import qualified Tptcc.TypeChecker as TypeChecker
 
@@ -205,7 +206,7 @@ renderDefaultSymbol (name, symbol) =
     "\t"
     [ Text.unpack name
     , Text.unpack (renderTypePretty (symbolType symbol))
-    , maybe "" (Text.unpack . operandType) (symbolPlace symbol)
+    , maybe "" (Text.unpack . placeKindCode . operandKind) (symbolPlace symbol)
     , maybe "" (Text.unpack . renderOperandValue . operandValue) (symbolPlace symbol)
     , maybe "false" (renderBool . operandIsStandardFunction) (symbolPlace symbol)
     , maybe "" (maybe "" renderBool . operandIsVariadic) (symbolPlace symbol)

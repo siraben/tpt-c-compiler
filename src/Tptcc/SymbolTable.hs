@@ -14,6 +14,7 @@ import qualified Data.Text as Text
 
 import Tptcc.CType
 import Tptcc.Operand
+import Tptcc.Tac (PlaceKind (..))
 
 data Namespace = TagNamespace | OrdinaryNamespace
   deriving (Eq, Show)
@@ -124,7 +125,7 @@ stdFunction name ty target isVariadic =
       , symbolPlace =
           Just
             ( Operand
-                { operandType = "i"
+                { operandKind = Immediate
                 , operandValue = OperandName target
                 , operandOffset = Nothing
                 , operandIsStandardFunction = True
@@ -144,7 +145,7 @@ constSymbol name ty value =
       , symbolPlace =
           Just
             ( Operand
-                { operandType = "i"
+                { operandKind = Immediate
                 , operandValue = OperandInt value
                 , operandOffset = Nothing
                 , operandIsStandardFunction = False

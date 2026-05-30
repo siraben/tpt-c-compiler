@@ -236,16 +236,16 @@ lowerAbstract options localSize instr
         (Just target, Just dest) -> emitGetAddress localSize target dest
         _ -> instr
   | instrType instr == IDebugBreakpoint =
-      Instr ISt [("source", Place "r" "r0"), ("dest", Place "g" (Text.pack (show (codeGenBaseAddr options + 0x80 - codeGenGlobalAddr options))))] []
+      Instr ISt [("source", Place Register "r0"), ("dest", Place Global (Text.pack (show (codeGenBaseAddr options + 0x80 - codeGenGlobalAddr options))))] []
   | instrType instr == IDebugFunctionCall =
-      Instr ISt [("source", fieldPlace "target" instr), ("dest", Place "g" (Text.pack (show (codeGenBaseAddr options + 0x8001 - codeGenGlobalAddr options))))] []
+      Instr ISt [("source", fieldPlace "target" instr), ("dest", Place Global (Text.pack (show (codeGenBaseAddr options + 0x8001 - codeGenGlobalAddr options))))] []
   | otherwise = instr
 
 emitGetAddress :: Integer -> Place -> Place -> Instr
 emitGetAddress localSize target dest =
-  case placeType target of
-    "g" -> Instr IMov [("source", target), ("dest", dest)] []
-    "p" -> Instr IAdd3 [("source", Place "r" "base_pointer"), ("offset", Place "i" (Text.pack (show (localSize + placeInteger target + 2)))), ("dest", dest)] []
-    "l" -> Instr IAdd3 [("source", Place "r" "base_pointer"), ("offset", Place "i" (Text.pack (show (placeInteger target + 1)))), ("dest", dest)] []
-    "pr" -> Instr IMov [("source", target), ("dest", dest)] []
+  case placeKind target of
+    Global -> Instr IMov [("source", target), ("dest", dest)] []
+    Parameter -> Instr IAdd3 [("source", Place Register "base_pointer"), ("offset", Place Immediate (Text.pack (show (localSize + placeInteger target + 2)))), ("dest", dest)] []
+    Local -> Instr IAdd3 [("source", Place Register "base_pointer"), ("offset", Place Immediate (Text.pack (show (placeInteger target + 1)))), ("dest", dest)] []
+    PointerRegister -> Instr IMov [("source", target), ("dest", dest)] []
     _ -> Instr INop [] []

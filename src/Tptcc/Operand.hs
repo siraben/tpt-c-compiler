@@ -7,13 +7,15 @@ module Tptcc.Operand
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+import Tptcc.Tac (PlaceKind)
+
 data OperandValue
   = OperandInt Integer
   | OperandName Text
   deriving (Eq, Ord, Show)
 
 data Operand = Operand
-  { operandType :: Text
+  { operandKind :: PlaceKind
   , operandValue :: OperandValue
   , operandOffset :: Maybe Operand
   , operandIsStandardFunction :: Bool

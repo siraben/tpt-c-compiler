@@ -31,20 +31,20 @@ promoteScalarLocals instrs =
         | instr <- instrs
         , instrType instr == IGetAddress
         , let target = fieldPlace "target" instr
-        , placeType target == "l"
+        , placeKind target == Local
         ]
     localSlots =
       Set.fromList
         [ placeInteger place
         | instr <- instrs
         , (_, place) <- instrFields instr
-        , placeType place == "l"
+        , placeKind place == Local
         ]
     promotable = Set.difference localSlots addressTaken
     firstTemp = 1 + maximum (0 : [placeInteger place | instr <- instrs, (_, place) <- instrFields instr, isVirtualRegister place])
     localRegisters =
       Map.fromList
-        [ (slot, Place "t" (Text.pack (show (firstTemp + fromIntegral index))))
+        [ (slot, Place Temporary (Text.pack (show (firstTemp + fromIntegral index))))
         | (index, slot) <- zip [(0 :: Int) ..] (Set.toAscList promotable)
         ]
 
@@ -53,11 +53,11 @@ promoteScalarLocals instrs =
 
     rewriteInstr instr
       | instrType instr == ISt
-      , placeType (fieldPlace "dest" instr) == "l"
+      , placeKind (fieldPlace "dest" instr) == Local
       , Just dest <- promotedLocal (fieldPlace "dest" instr) =
           Instr IMov [("source", fieldPlace "source" instr), ("dest", dest)] []
       | instrType instr == ILd
-      , placeType (fieldPlace "source" instr) == "l"
+      , placeKind (fieldPlace "source" instr) == Local
       , Just source <- promotedLocal (fieldPlace "source" instr) =
           Instr IMov [("source", source), ("dest", fieldPlace "dest" instr)] []
       | otherwise = instr
@@ -65,7 +65,7 @@ promoteScalarLocals instrs =
 optimizeInstructions :: [Instr] -> [Instr]
 optimizeInstructions = eliminateDeadVirtualWrites . propagateCopiesAndConstants
 
-type CopyEnv = Map.Map (Text, Text) Place
+type CopyEnv = Map.Map (PlaceKind, Text) Place
 
 propagateCopiesAndConstants :: [Instr] -> [Instr]
 propagateCopiesAndConstants = reverse . snd . foldl' step (Map.empty, [])
@@ -94,7 +94,7 @@ rewriteInstructionUses env instr =
     rewriteUse name place
       | name `elem` uses =
           let resolved = resolveEnvPlace env place
-           in if placeType resolved == "i" && not (fieldAcceptsImmediate instr name)
+           in if placeKind resolved == Immediate && not (fieldAcceptsImmediate instr name)
                 then place
                 else resolved
       | otherwise = place
@@ -130,7 +130,7 @@ resolveEnvPlace env = go Set.empty
           | Just next <- Map.lookup key env -> go (Set.insert key seen) next
         _ -> place
 
-definedPlaceKeys :: Instr -> [(Text, Text)]
+definedPlaceKeys :: Instr -> [(PlaceKind, Text)]
 definedPlaceKeys instr =
   [ key
   | name <- defFieldNames instr
@@ -150,7 +150,7 @@ updateCopyEnv env instr
 
 isPropagatablePlace :: Place -> Bool
 isPropagatablePlace place =
-  placeType place `elem` ["i", "t", "vr", "pr", "r"]
+  placeKind place `elem` [Immediate, Temporary, VirtualRegister, PointerRegister, Register]
 
 eliminateDeadVirtualWrites :: [Instr] -> [Instr]
 eliminateDeadVirtualWrites instrs =
@@ -233,7 +233,7 @@ allocateMethodRegisters nextSpillSlot currentTac =
           used = usedAllocatedRegisters rewritten
        in pure (rewritten, used, nextSpillSlot)
     Left reg ->
-      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place "l" (Text.pack (show nextSpillSlot))) currentTac)
+      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place Local (Text.pack (show nextSpillSlot))) currentTac)
 
 colourTac :: [Instr] -> Either Integer (Map.Map Integer Integer)
 colourTac tac =
@@ -717,10 +717,10 @@ callerSafeRegisters :: [Integer]
 callerSafeRegisters = [1 .. 21]
 
 spillScratchA :: Place
-spillScratchA = Place "r" "20"
+spillScratchA = Place Register "20"
 
 spillScratchB :: Place
-spillScratchB = Place "r" "21"
+spillScratchB = Place Register "21"
 
 usedAllocatedRegisters :: [Instr] -> [Integer]
 usedAllocatedRegisters instrs =
@@ -733,11 +733,11 @@ usedAllocatedRegisters instrs =
 
 allocatedPhysicalRegister :: Place -> Maybe Integer
 allocatedPhysicalRegister place
-  | placeType place == "r" =
+  | placeKind place == Register =
       case placeIntegerMaybe place of
         Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
-  | placeType place `elem` ["t", "pr", "vr"] =
+  | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
       case placeIntegerMaybe place of
         Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
@@ -785,9 +785,9 @@ rewriteInstrRegisters colours instr =
 
 rewritePlace :: Map.Map Integer Integer -> Place -> Place
 rewritePlace colours place
-  | placeType place `elem` ["t", "pr", "vr"] =
+  | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
       case Map.lookup (placeInteger place) colours of
-        Just colour -> Place "r" (Text.pack (show colour))
+        Just colour -> Place Register (Text.pack (show colour))
         Nothing -> place
   | otherwise = place
 
@@ -883,21 +883,21 @@ peephole _ instrs =
       | instrType c == IMov
       , instrType nc == IAdd
       , fieldPlace "dest" c == fieldPlace "dest" nc
-      , placeType (fieldPlace "source" c) == "i"
-      , placeType (fieldPlace "source" nc) == "i"
+      , placeKind (fieldPlace "source" c) == Immediate
+      , placeKind (fieldPlace "source" nc) == Immediate
       , Just first <- placeIntegerMaybe (fieldPlace "source" c)
       , Just second <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr IMov [("source", Place "i" (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == IAdd && fieldPlace "source" c == Place "i" "0" = acc
+          Instr IMov [("source", Place Immediate (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" nc)] [] : rest
+      | instrType c == IAdd && fieldPlace "source" c == Place Immediate "0" = acc
       | instrType c == IAdd3
       , instrType nc == IAdd
-      , fieldPlace "source" c == Place "r" "base_pointer"
-      , placeType (fieldPlace "offset" c) == "i"
-      , placeType (fieldPlace "source" nc) == "i"
+      , fieldPlace "source" c == Place Register "base_pointer"
+      , placeKind (fieldPlace "offset" c) == Immediate
+      , placeKind (fieldPlace "source" nc) == Immediate
       , fieldPlace "dest" c == fieldPlace "dest" nc
       , Just offset <- placeIntegerMaybe (fieldPlace "offset" c)
       , Just source <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr IAdd3 [("source", Place "r" "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place "i" (Text.pack (show (offset + source))))] [] : rest
+          Instr IAdd3 [("source", Place Register "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place Immediate (Text.pack (show (offset + source))))] [] : rest
       | instrType c == IJmp && instrType nc == ILabel && fieldPlace "target" c == fieldPlace "target" nc = acc
       | otherwise = c : acc
     step c [] = [c]
@@ -933,7 +933,7 @@ rewriteLabelAliases aliases instr =
   instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
   where
     rewritePlaceLabel place
-      | placeType place == "i" = place {placeValue = resolveLabelAlias aliases (placeValue place)}
+      | placeKind place == Immediate = place {placeValue = resolveLabelAlias aliases (placeValue place)}
       | otherwise = place
 
 resolveLabelAlias :: Map.Map Text Text -> Text -> Text
@@ -992,7 +992,7 @@ purePhysicalDefinition instr =
 
 physicalAllocatableRegister :: Place -> Maybe Integer
 physicalAllocatableRegister place
-  | placeType place == "r" =
+  | placeKind place == Register =
       case placeIntegerMaybe place of
         Just reg | reg `elem` allocatableRegisters -> Just reg
         _ -> Nothing
@@ -1002,7 +1002,7 @@ optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
   removeTrailingDeadWrites . removeTrailingExitLabels . removeReturnRoundTrip . stripTrailingExitJump
   where
-    exitTarget = Place "i" (".exit_" <> methodOutputName method)
+    exitTarget = Place Immediate (".exit_" <> methodOutputName method)
 
     stripTrailingExitJump instrs =
       case reverse instrs of
@@ -1029,9 +1029,9 @@ removeReturnRoundTrip instrs =
     restore : save : rest
       | instrType save == IMov
           && instrType restore == IMov
-          && fieldPlace "source" save == Place "r" "return_reg"
+          && fieldPlace "source" save == Place Register "return_reg"
           && fieldPlace "dest" save == fieldPlace "source" restore
-          && fieldPlace "dest" restore == Place "r" "return_reg" ->
+          && fieldPlace "dest" restore == Place Register "return_reg" ->
           reverse rest
     _ -> instrs
 
@@ -1073,5 +1073,5 @@ instrTouchesFrame instr =
 
 placeTouchesFrame :: Place -> Bool
 placeTouchesFrame place =
-  placeType place `elem` ["l", "p"]
-    || place == Place "r" "base_pointer"
+  placeKind place `elem` [Local, Parameter]
+    || place == Place Register "base_pointer"
