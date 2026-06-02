@@ -54,23 +54,11 @@ find_r3emu() {
 }
 
 run_keyboard_case() {
-  local mode="$1"
-  local asm="$tmpdir/input-$mode.asm"
-  local bin="$tmpdir/input-$mode.bin"
-  local out="$tmpdir/input-$mode.out"
+  local asm="$tmpdir/input.asm"
+  local bin="$tmpdir/input.bin"
+  local out="$tmpdir/input.out"
 
-  case "$mode" in
-    optimized)
-      run_hs_compiler "$tmpdir/input.c" --output "$asm" >/dev/null
-      ;;
-    unoptimized)
-      run_hs_compiler --dump-native-asm-unoptimized "$tmpdir/input.c" >"$asm"
-      ;;
-    *)
-      echo "unknown mode: $mode" >&2
-      exit 1
-      ;;
-  esac
+  run_hs_compiler "$tmpdir/input.c" --output "$asm" >/dev/null
 
   assemble_with_r3 "$asm" "$bin"
   timeout "${R3EMU_TIMEOUT:-10s}" "$r3emu" "$bin" --headless --stdout --keyboard-input xy >"$out"
@@ -78,7 +66,7 @@ run_keyboard_case() {
   local actual
   actual="$(tr -d '\r\n' <"$out")"
   if [[ "$actual" != "xy0" ]]; then
-    echo "R3 keyboard smoke failed for $mode: expected xy0, got '$actual'" >&2
+    echo "R3 keyboard smoke failed: expected xy0, got '$actual'" >&2
     exit 1
   fi
 }
@@ -102,8 +90,7 @@ C
 cd "$repo_root"
 r3emu="$(find_r3emu)"
 
-run_keyboard_case optimized
-run_keyboard_case unoptimized
+run_keyboard_case
 
 printf 'filez' >"$tmpdir/keys.txt"
 run_hs_compiler "$tmpdir/input.c" --output "$tmpdir/input-file.asm" >/dev/null
@@ -115,4 +102,4 @@ if [[ "$file_actual" != "fil" ]]; then
   exit 1
 fi
 
-echo "R3 keyboard input smoke passed for optimized, unoptimized, and file-backed input"
+echo "R3 keyboard input smoke passed for direct and file-backed input"

@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Data.List (intercalate, sort, sortOn)
+import Data.List (intercalate, sortOn)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as Text
 import Numeric (showHex)
@@ -10,7 +10,7 @@ import System.FilePath (replaceExtension)
 import qualified Options.Applicative as OA
 
 import Tptcc.Ast (Node, renderAst)
-import Tptcc.CodeGen (CodeGenOptions (..), defaultCodeGenOptions, dumpNativeAsmOptimized, dumpNativeAsmOptimizedWithOptions, dumpNativeAsmUnoptimized)
+import Tptcc.CodeGen (CodeGenOptions (..), defaultCodeGenOptions, dumpNativeAsmWithOptions)
 import Tptcc.CType (renderTypePretty)
 import Tptcc.IRGlobal (dumpIRGlobals)
 import Tptcc.IRSimpleTac (dumpSimpleTac)
@@ -38,8 +38,6 @@ data Command
   | DumpIRGlobals FilePath
   | DumpSimpleTac FilePath
   | DumpSSA FilePath
-  | DumpNativeAsmUnoptimized FilePath
-  | DumpNativeAsmOptimized FilePath
   | DumpDefaultSymbols
   deriving (Eq, Show)
 
@@ -47,7 +45,6 @@ data CompileConfig = CompileConfig
   { compileInput :: FilePath
   , compileOutput :: FilePath
   , compileOptions :: CodeGenOptions
-  , compileSymbolsOutput :: Maybe FilePath
   }
   deriving (Eq, Show)
 
@@ -70,8 +67,6 @@ commandParser =
     , dumpFlag DumpIRGlobals "dump-ir-globals" "Print global IR events"
     , dumpFlag DumpSimpleTac "dump-simple-tac" "Print simple TAC"
     , dumpFlag DumpSSA "dump-ssa" "Print SSA"
-    , dumpFlag DumpNativeAsmUnoptimized "dump-native-asm-unoptimized" "Print unoptimized native assembly"
-    , dumpFlag DumpNativeAsmOptimized "dump-native-asm-optimized" "Print optimized native assembly"
     , DumpDefaultSymbols <$ OA.flag' () (OA.long "dump-default-symbols" <> OA.help "Print built-in symbols")
     , RunNative <$> compileConfigParser
     ]
@@ -96,16 +91,14 @@ compileConfigParser :: OA.Parser CompileConfig
 compileConfigParser =
   mkConfig
     <$> OA.optional (OA.strOption (OA.long "output" <> OA.metavar "OUTPUT" <> OA.help "Write assembly to OUTPUT"))
-    <*> OA.optional (OA.strOption (OA.long "symbols" <> OA.metavar "SYMBOLS_JSON" <> OA.help "Write symbols JSON"))
     <*> OA.many codeGenOptionParser
     <*> OA.argument OA.str (OA.metavar "INPUT")
   where
-    mkConfig output symbols optionUpdates input =
+    mkConfig output optionUpdates input =
       CompileConfig
         { compileInput = input
         , compileOutput = fromMaybe (replaceExtension input "asm") output
         , compileOptions = foldl' (flip ($)) defaultCodeGenOptions optionUpdates
-        , compileSymbolsOutput = symbols
         }
 
 codeGenOptionParser :: OA.Parser (CodeGenOptions -> CodeGenOptions)
@@ -115,24 +108,11 @@ codeGenOptionParser =
     , (\n opts -> opts {codeGenTermWidth = n}) <$> integerOption "term-width" "WIDTH" "Set terminal width"
     , (\n opts -> opts {codeGenTermHeight = n}) <$> integerOption "term-height" "HEIGHT" "Set terminal height"
     , (\n opts -> opts {codeGenGlobalAddr = codeGenGlobalAddr opts + n}) <$> integerOption "offset" "OFFSET" "Offset global address"
-    , (\values opts -> opts {codeGenBreakpoints = sort values}) <$> breakpointOption
     ]
 
 integerOption :: String -> String -> String -> OA.Parser Integer
 integerOption name metavar description =
   OA.option OA.auto (OA.long name <> OA.metavar metavar <> OA.help description)
-
-breakpointOption :: OA.Parser [Integer]
-breakpointOption =
-  OA.option
-    (OA.eitherReader parseBreakpoints)
-    (OA.long "breakpoints" <> OA.metavar "[ADDR,...]" <> OA.help "Enable debug breakpoints")
-
-parseBreakpoints :: String -> Either String [Integer]
-parseBreakpoints raw =
-  case reads raw of
-    [(values, "")] -> Right values
-    _ -> Left ("invalid breakpoint list: " <> raw)
 
 runCommand :: Command -> IO ()
 runCommand = \case
@@ -143,23 +123,12 @@ runCommand = \case
   DumpIRGlobals input -> dumpIRGlobalEvents input
   DumpSimpleTac input -> dumpSimpleTacEvents input
   DumpSSA input -> dumpSSAEvents input
-  DumpNativeAsmUnoptimized input -> dumpNativeAsmUnoptimizedEvents input
-  DumpNativeAsmOptimized input -> dumpNativeAsmOptimizedEvents input
   DumpDefaultSymbols -> dumpDefaultSymbols
 
 runNativeCompiler :: CompileConfig -> IO ()
 runNativeCompiler config = do
-  asm <- compileInputWith (compileInput config) (dumpNativeAsmOptimizedWithOptions (compileOptions config))
+  asm <- compileInputWith (compileInput config) (dumpNativeAsmWithOptions (compileOptions config))
   writeFile (compileOutput config) asm
-  maybe (pure ()) (const (putStrLn "[ERROR] dkjson not found, symbols cannot be exported to json")) (compileSymbolsOutput config)
-
-dumpNativeAsmOptimizedEvents :: FilePath -> IO ()
-dumpNativeAsmOptimizedEvents input =
-  putStr =<< compileInputWith input dumpNativeAsmOptimized
-
-dumpNativeAsmUnoptimizedEvents :: FilePath -> IO ()
-dumpNativeAsmUnoptimizedEvents input =
-  putStr =<< compileInputWith input dumpNativeAsmUnoptimized
 
 dumpSimpleTacEvents :: FilePath -> IO ()
 dumpSimpleTacEvents input =

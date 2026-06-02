@@ -63,7 +63,7 @@ run_case() {
   local name="$1"
   local expected="$2"
   local keyboard_input="${3:-}"
-  local modes="${4:-optimized}"
+  local modes="${4:-default}"
   local source="$fixtures_dir/$name.c"
 
   if [[ ! -f "$source" ]]; then
@@ -77,11 +77,8 @@ run_case() {
     local out="$tmpdir/$name-$mode.out"
 
     case "$mode" in
-      optimized)
+      default)
         run_hs_compiler "$source" --output "$asm" >/dev/null
-        ;;
-      unoptimized)
-        run_hs_compiler --dump-native-asm-unoptimized "$source" >"$asm"
         ;;
     esac
 
@@ -106,22 +103,22 @@ run_case() {
 cd "$repo_root"
 r3emu="$(find_r3emu)"
 
-run_case arithmetic-divrem "<172" "" "optimized unoptimized"
-run_case variable-divrem "33" "" "optimized unoptimized"
-run_case recursion-and-calls "82" "" "optimized unoptimized"
-run_case short-circuit "42" "" "optimized unoptimized"
+run_case arithmetic-divrem "<172"
+run_case variable-divrem "33"
+run_case recursion-and-calls "82"
+run_case short-circuit "42"
 run_case arrays-pointers "965"
 run_case global-matrix "56"
 run_case switch-loop ">"
-run_case do-while-empty "8" "" "optimized unoptimized"
+run_case do-while-empty "8"
 run_case compound-ternary "454"
-run_case input-flow "Ab0" "ab" "optimized unoptimized"
-run_case function-pointers "53" "" "optimized unoptimized"
-run_case struct-members "8" "" "optimized unoptimized"
-run_case union-members "6" "" "optimized unoptimized"
-run_case enum-switch "36" "" "optimized unoptimized"
+run_case input-flow "Ab0" "ab"
+run_case function-pointers "53"
+run_case struct-members "8"
+run_case union-members "6"
+run_case enum-switch "36"
 run_case feature-torture "7181"
 run_case c89-parity "22"
-run_case semantic-regressions "x21745ABCDY,Z,5" "" "optimized unoptimized"
+run_case semantic-regressions "x21745ABCDY,Z,5"
 
 echo "R3 C correctness suite passed"

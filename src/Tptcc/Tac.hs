@@ -85,8 +85,6 @@ data InstrType
   | IAsm
   | ICall
   | ICmp
-  | IDebugBreakpoint
-  | IDebugFunctionCall
   | IGetAddress
   | IJa
   | IJae
@@ -153,8 +151,6 @@ instrMnemonic instr =
     IAsm -> "asm"
     ICall -> "call"
     ICmp -> "cmp"
-    IDebugBreakpoint -> "!debug_breakpoint"
-    IDebugFunctionCall -> "!debug_function_call"
     IGetAddress -> "!get_address"
     IJa -> "ja"
     IJae -> "jae"

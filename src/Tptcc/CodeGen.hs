@@ -1,9 +1,7 @@
 module Tptcc.CodeGen
   ( CodeGenOptions (..)
   , defaultCodeGenOptions
-  , dumpNativeAsmUnoptimized
-  , dumpNativeAsmOptimized
-  , dumpNativeAsmOptimizedWithOptions
+  , dumpNativeAsmWithOptions
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -16,42 +14,32 @@ import Tptcc.CodeGen.Options
 import Tptcc.CodeGen.Render
 import Tptcc.CodeGen.Stdlib
 import Tptcc.IRGlobal (GlobalInfo (..), generateIRGlobalInfo)
-import Tptcc.IRSimpleTac (generateSimpleTacWithBreakpoints)
+import Tptcc.IRSimpleTac (generateSimpleTac)
 import Tptcc.SSA (lowerMethodSSA)
 import Tptcc.Tac
 import Tptcc.TypeChecker (includedStandardFunctions)
 
-dumpNativeAsmUnoptimized :: Node -> Either String String
-dumpNativeAsmUnoptimized ast = do
-  program <- generateSimpleTacWithBreakpoints (codeGenBreakpoints defaultCodeGenOptions) ast
+dumpNativeAsmWithOptions :: CodeGenOptions -> Node -> Either String String
+dumpNativeAsmWithOptions options ast = do
+  program <- generateSimpleTac ast
   globalInfo <- generateIRGlobalInfo ast
   stdlib <- includedStandardFunctions ast
-  renderCheckedProgram defaultCodeGenOptions False program globalInfo stdlib
+  renderCheckedProgram options program globalInfo stdlib
 
-dumpNativeAsmOptimized :: Node -> Either String String
-dumpNativeAsmOptimized = dumpNativeAsmOptimizedWithOptions defaultCodeGenOptions
-
-dumpNativeAsmOptimizedWithOptions :: CodeGenOptions -> Node -> Either String String
-dumpNativeAsmOptimizedWithOptions options ast = do
-  program <- generateSimpleTacWithBreakpoints (codeGenBreakpoints options) ast
-  globalInfo <- generateIRGlobalInfo ast
-  stdlib <- includedStandardFunctions ast
-  renderCheckedProgram options True program globalInfo stdlib
-
-renderCheckedProgram :: CodeGenOptions -> Bool -> TacProgram -> GlobalInfo -> [String] -> Either String String
-renderCheckedProgram options optimized program globalInfo stdlib
+renderCheckedProgram :: CodeGenOptions -> TacProgram -> GlobalInfo -> [String] -> Either String String
+renderCheckedProgram options program globalInfo stdlib
   | tacProgramGlobalSize program /= globalInfoSize globalInfo =
       Left $
         "global size mismatch between TAC and global-data pass: "
           <> show (tacProgramGlobalSize program)
           <> " /= "
           <> show (globalInfoSize globalInfo)
-  | otherwise = renderProgram options optimized program globalInfo stdlib
+  | otherwise = renderProgram options program globalInfo stdlib
 
-renderProgram :: CodeGenOptions -> Bool -> TacProgram -> GlobalInfo -> [String] -> Either String String
-renderProgram options optimized program globalInfo stdlib = do
-  globalAsm <- renderGlobalInstructions options optimized (tacProgramGlobalInstructions program)
-  methodAsm <- mapM (renderMethod options optimized) (tacProgramMethods program)
+renderProgram :: CodeGenOptions -> TacProgram -> GlobalInfo -> [String] -> Either String String
+renderProgram options program globalInfo stdlib = do
+  globalAsm <- renderGlobalInstructions options (tacProgramGlobalInstructions program)
+  methodAsm <- mapM (renderMethod options) (tacProgramMethods program)
   pure $
     concat
       [ header options globalInfo
@@ -153,40 +141,28 @@ renderGlobalData options globalInfo
       | index <- [0 .. globalInfoSize globalInfo - 1]
       ]
 
-renderGlobalInstructions :: CodeGenOptions -> Bool -> [Instr] -> Either String String
-renderGlobalInstructions options optimized instructions = do
-  lowered <-
-    if optimized
-      then do
-        (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
-        pure (finalizeOptimizedInstructions options allocated)
-      else pure abstractLowered
+renderGlobalInstructions :: CodeGenOptions -> [Instr] -> Either String String
+renderGlobalInstructions options instructions = do
+  (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
+  let lowered = finalizeOptimizedInstructions options allocated
   concat <$> mapM (renderInstr options 0) lowered
   where
     abstractLowered = map (lowerAbstract options 0) instructions
 
-renderMethod :: CodeGenOptions -> Bool -> MethodOutput -> Either String String
-renderMethod options optimized method = do
-  (allocated, _, allocatedLocalSize) <-
-    if optimized
-      then allocateMethodRegisters sourceLocalSize optimizedInstructions
-      else pure (abstractLowered, [], sourceLocalSize)
+renderMethod :: CodeGenOptions -> MethodOutput -> Either String String
+renderMethod options method = do
+  (allocated, _, allocatedLocalSize) <- allocateMethodRegisters sourceLocalSize registerAllocationInput
   let loweredAbstract =
-        if optimized
-          then map (lowerAbstract options allocatedLocalSize) allocated
-          else allocated
-      lowered =
-        if optimized
-          then optimizeMethodTail method (finalizeOptimizedInstructions options loweredAbstract)
-          else loweredAbstract
+        map (lowerAbstract options allocatedLocalSize) allocated
+      lowered = optimizeMethodTail method (finalizeOptimizedInstructions options loweredAbstract)
       usedRegisters = usedAllocatedRegisters lowered
       savedRegisters
         | methodOutputName method == "main" = []
         | otherwise = usedRegisters
       frameLocalSize
-        | optimized && not (any instrTouchesFrame lowered) = 0
+        | not (any instrTouchesFrame lowered) = 0
         | otherwise = allocatedLocalSize
-      needsFrame = not optimized || frameLocalSize > 0 || any instrTouchesFrame lowered
+      needsFrame = frameLocalSize > 0 || any instrTouchesFrame lowered
       frameSetup
         | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
         | otherwise = ""
@@ -220,14 +196,10 @@ renderMethod options optimized method = do
         else "\tret\n"
   where
     sourceLocalSize = methodOutputLocalSize method
-    optimizedSource =
-      if optimized
-        then
-          methodOutputInstructions $
-            lowerMethodSSA method {methodOutputInstructions = promoteScalarLocals (methodOutputInstructions method)}
-        else methodOutputInstructions method
-    abstractLowered = map (lowerAbstract options sourceLocalSize) optimizedSource
-    optimizedInstructions = optimizeInstructions optimizedSource
+    ssaInstructions =
+      methodOutputInstructions $
+        lowerMethodSSA method {methodOutputInstructions = promoteScalarLocals (methodOutputInstructions method)}
+    registerAllocationInput = optimizeInstructions ssaInstructions
 
 lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
 lowerAbstract options localSize instr
@@ -235,10 +207,6 @@ lowerAbstract options localSize instr
       case (lookup "target" (instrFields instr), lookup "dest" (instrFields instr)) of
         (Just target, Just dest) -> emitGetAddress localSize target dest
         _ -> instr
-  | instrType instr == IDebugBreakpoint =
-      Instr ISt [("source", Place Register "r0"), ("dest", Place Global (Text.pack (show (codeGenBaseAddr options + 0x80 - codeGenGlobalAddr options))))] []
-  | instrType instr == IDebugFunctionCall =
-      Instr ISt [("source", fieldPlace "target" instr), ("dest", Place Global (Text.pack (show (codeGenBaseAddr options + 0x8001 - codeGenGlobalAddr options))))] []
   | otherwise = instr
 
 emitGetAddress :: Integer -> Place -> Place -> Instr

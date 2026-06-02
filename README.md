@@ -31,7 +31,7 @@ tptasm("path/to/output.asm")
 # Usage
 
 ```bash
-cabal run -v0 exe:tptcc-hs -- input.c [--output output.asm] [--size total-memory-size] [--term-height terminal-rows] [--term-width terminal-cols] [--offset global-offset] [--symbols symbols.json] [--breakpoints "[5, 8, 13]"]
+cabal run -v0 exe:tptcc-hs -- input.c [--output output.asm] [--size total-memory-size] [--term-height terminal-rows] [--term-width terminal-cols] [--offset global-offset]
 ```
 
 | Optional Argument | Description | Default |
@@ -41,8 +41,6 @@ cabal run -v0 exe:tptcc-hs -- input.c [--output output.asm] [--size total-memory
 | `--term-height` | Terminal character rows | `8` |
 | `--term-width` | Terminal character columns | `12` |
 | `--offset` | Global memory offset | `0` |
-| `--symbols` | Symbol table JSON output path | unset |
-| `--breakpoints` | Source line breakpoint list | `[]` |
 
 Debug dump modes are available for compiler development:
 
@@ -53,8 +51,6 @@ cabal run -v0 exe:tptcc-hs -- --dump-type-events input.c
 cabal run -v0 exe:tptcc-hs -- --dump-ir-globals input.c
 cabal run -v0 exe:tptcc-hs -- --dump-simple-tac input.c
 cabal run -v0 exe:tptcc-hs -- --dump-ssa input.c
-cabal run -v0 exe:tptcc-hs -- --dump-native-asm-optimized input.c
-cabal run -v0 exe:tptcc-hs -- --dump-native-asm-unoptimized input.c
 ```
 
 # C Dialect Status
@@ -74,7 +70,7 @@ Currently supported:
 - integer constant expressions in enum values, array sizes, and `case` labels
 - string and character literals with common escapes
 - inline `asm(...)` blocks for R3-specific code
-- SSA-based optimization and graph-colouring register allocation in the optimized pipeline
+- SSA-based optimization and graph-colouring register allocation
 
 Major C89 gaps:
 
@@ -98,7 +94,7 @@ Run the emulator-backed C correctness suite with:
 nix develop --command bash scripts/r3-correctness.sh
 ```
 
-The suite compiles checked-in fixtures from `tests/r3-correctness/`, assembles them with the R3 toolchain, runs them in the emulator, and checks terminal output. The old all-in-one Lua/Haskell assembly equivalence script has been removed because optimized Haskell output intentionally diverges from the Lua backend.
+The suite compiles checked-in fixtures from `tests/r3-correctness/`, assembles them with the R3 toolchain, runs them in the emulator, and checks terminal output.
 
 # Standard Library Documentation
 Many of the methods in this library have the prefix "`__`" which usually indicates that these methods are for the compiler's internal use. However, since a formal standard library is still being designed, these temporary methods can still be tremendously useful.

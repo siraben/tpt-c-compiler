@@ -1,7 +1,6 @@
 module Tptcc.IRSimpleTac
   ( dumpSimpleTac
   , generateSimpleTac
-  , generateSimpleTacWithBreakpoints
   , Instr (..)
   , MethodOutput (..)
   , Place (..)
@@ -28,7 +27,7 @@ import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.IRSimpleTac.Types
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Tac hiding (fieldString)
-import Tptcc.Token (SourcePos (..), Token (..))
+import Tptcc.Token (Token (..))
 
 dumpSimpleTac :: Node -> Either String [String]
 dumpSimpleTac ast = do
@@ -36,11 +35,8 @@ dumpSimpleTac ast = do
   pure (renderTac program)
 
 generateSimpleTac :: Node -> Either String TacProgram
-generateSimpleTac = generateSimpleTacWithBreakpoints []
-
-generateSimpleTacWithBreakpoints :: [Integer] -> Node -> Either String TacProgram
-generateSimpleTacWithBreakpoints requestedBreakpoints ast = do
-  (_, st) <- runTac requestedBreakpoints (emitProgram ast)
+generateSimpleTac ast = do
+  (_, st) <- runTac (emitProgram ast)
   pure
     TacProgram
       { tacProgramMethods = reverse (methods st)
@@ -48,12 +44,12 @@ generateSimpleTacWithBreakpoints requestedBreakpoints ast = do
       , tacProgramGlobalInstructions = toList (instructions st)
       }
 
-runTac :: [Integer] -> TacM a -> Either String (a, TacState)
-runTac requestedBreakpoints action =
-  runPureEff (Error.runErrorNoCallStack (State.runState (initialState requestedBreakpoints) action))
+runTac :: TacM a -> Either String (a, TacState)
+runTac action =
+  runPureEff (Error.runErrorNoCallStack (State.runState initialState action))
 
-initialState :: [Integer] -> TacState
-initialState requestedBreakpoints =
+initialState :: TacState
+initialState =
   TacState
     { localOffset = 0
     , globalOffset = 0
@@ -70,8 +66,6 @@ initialState requestedBreakpoints =
     , locals = Map.empty
     , instructions = Seq.empty
     , methods = []
-    , breakpoints = requestedBreakpoints
-    , breakpointIndex = 0
     }
 
 emitProgram :: Node -> TacM ()
@@ -198,7 +192,7 @@ restoreFunctionContext previous output =
         }
 
 emitBlock :: Node -> TacM ()
-emitBlock block = withLocalScope (mapM_ emitStatementWithBreakpoint (childNodes block))
+emitBlock block = withLocalScope (mapM_ emitStatement (childNodes block))
 
 withLocalScope :: TacM a -> TacM a
 withLocalScope action = do
@@ -206,20 +200,6 @@ withLocalScope action = do
   result <- action
   State.modify (\st -> st {locals = previousLocals})
   pure result
-
-emitStatementWithBreakpoint :: Node -> TacM ()
-emitStatementWithBreakpoint statement = do
-  maybeEmitBreakpoint statement
-  emitStatement statement
-
-maybeEmitBreakpoint :: Node -> TacM ()
-maybeEmitBreakpoint statement = do
-  st <- State.get
-  case drop (breakpointIndex st) (breakpoints st) of
-    breakpoint : _ | fromIntegral (row (nodePos statement)) > breakpoint - 1 -> do
-      emit IDebugBreakpoint [("target", Place Immediate (Text.pack (show breakpoint)))]
-      State.modify (\s -> s {breakpointIndex = breakpointIndex s + 1})
-    _ -> pure ()
 
 emitStatement :: Node -> TacM ()
 emitStatement statement = do
@@ -996,10 +976,6 @@ emitPostfixOps place context (op : rest) = do
           if isLValue place
             then loadOperandIntoRegister place
             else pure place
-        whenBreakpointsEnabled $ do
-          debugTarget <- nextTemp
-          _ <- emitMove target debugTarget
-          emit IDebugFunctionCall [("target", debugTarget)]
         emit ICall [("target", target)]
         unless isStandard $
           emit IAdd [("source", Place Immediate (Text.pack (show (length args)))), ("dest", Place Register "stack_pointer")]
@@ -1118,11 +1094,6 @@ emitArgument arg = do
       then loadOperandIntoRegister place
       else pure place
   emit IPush [("target", pushed)]
-
-whenBreakpointsEnabled :: TacM () -> TacM ()
-whenBreakpointsEnabled action = do
-  enabled <- not . null . breakpoints <$> State.get
-  when enabled action
 
 postfixArgumentNodes :: PostfixOp -> TacM [Node]
 postfixArgumentNodes op =

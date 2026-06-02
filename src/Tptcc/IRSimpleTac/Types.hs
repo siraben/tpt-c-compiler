@@ -67,8 +67,6 @@ data TacState = TacState
   , locals :: Map.Map Text LocalInfo
   , instructions :: Seq Instr
   , methods :: [MethodOutput]
-  , breakpoints :: [Integer]
-  , breakpointIndex :: Int
   }
   deriving stock (Eq, Show)
 

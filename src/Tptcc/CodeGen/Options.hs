@@ -9,7 +9,6 @@ data CodeGenOptions = CodeGenOptions
   , codeGenTermHeight :: Integer
   , codeGenGlobalAddr :: Integer
   , codeGenBaseAddr :: Integer
-  , codeGenBreakpoints :: [Integer]
   }
   deriving (Eq, Show)
 
@@ -21,5 +20,4 @@ defaultCodeGenOptions =
     , codeGenTermHeight = 8
     , codeGenGlobalAddr = 1
     , codeGenBaseAddr = 0x9F80
-    , codeGenBreakpoints = []
     }
