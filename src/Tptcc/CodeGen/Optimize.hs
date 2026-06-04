@@ -1,7 +1,7 @@
 module Tptcc.CodeGen.Optimize
   ( allocateMethodRegisters
   , allocateRegisters
-  , finalizeOptimizedInstructions
+  , cleanupAllocatedInstructions
   , instrTouchesFrame
   , optimizeInstructions
   , optimizeMethodTail
@@ -11,14 +11,13 @@ module Tptcc.CodeGen.Optimize
 
 import Control.Applicative ((<|>))
 import Data.List (maximumBy, sortBy)
-import Data.Maybe (isJust, listToMaybe)
+import Data.Maybe (listToMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-import Tptcc.CodeGen.Options
 import Tptcc.Tac
 
 promoteScalarLocals :: [Instr] -> [Instr]
@@ -64,6 +63,72 @@ promoteScalarLocals instrs =
 
 optimizeInstructions :: [Instr] -> [Instr]
 optimizeInstructions = eliminateDeadVirtualWrites . propagateCopiesAndConstants
+
+cleanupAllocatedInstructions :: [Instr] -> [Instr]
+cleanupAllocatedInstructions [] = []
+cleanupAllocatedInstructions instrs =
+  cleanupPass (cleanupPass instrs)
+  where
+    cleanupPass = foldr step []
+
+    step instr acc@(next : rest)
+      | instrType instr == IMov && fieldPlace "source" instr == fieldPlace "dest" instr = acc
+      | pureRegisterDefinition instr
+      , Just def <- singleDefPlace instr
+      , Just nextDef <- singleDefPlace next
+      , def == nextDef
+      , def `notElem` usePlaces next =
+          acc
+      | instrType instr == ISt
+      , instrType next == ILd
+      , fieldPlace "dest" instr == fieldPlace "source" next =
+          if fieldPlace "source" instr == fieldPlace "dest" next
+            then instr : rest
+            else instr : Instr IMov [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next)] [] : rest
+      | instrType instr == IAdd3
+      , instrType next == ILd
+      , fieldPlace "dest" instr == fieldPlace "source" next
+      , fieldPlace "dest" next == fieldPlace "source" next =
+          Instr ILdOffset [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "offset" instr)] [] : rest
+      | instrType instr == IMov
+      , instrType next == ILd
+      , fieldPlace "dest" instr == fieldPlace "source" next
+      , fieldPlace "dest" next == fieldPlace "source" next =
+          Instr ILd [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next)] [] : rest
+      | instrType instr == IAdd
+      , instrType next == ILd
+      , fieldPlace "dest" instr == fieldPlace "source" next
+      , fieldPlace "dest" next == fieldPlace "source" next =
+          Instr ILdOffset [("source", fieldPlace "source" next), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "source" instr)] [] : rest
+      | instrType instr == IMov
+      , instrType next == IAdd
+      , fieldPlace "dest" instr == fieldPlace "dest" next
+      , isVirtualRegister (fieldPlace "source" instr) =
+          Instr IAdd3 [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "source" next)] [] : rest
+      | instrType instr == IMov
+      , instrType next == IAdd
+      , fieldPlace "dest" instr == fieldPlace "dest" next
+      , placeKind (fieldPlace "source" instr) == Immediate
+      , placeKind (fieldPlace "source" next) == Immediate
+      , Just first <- placeIntegerMaybe (fieldPlace "source" instr)
+      , Just second <- placeIntegerMaybe (fieldPlace "source" next) =
+          Instr IMov [("source", Place Immediate (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" next)] [] : rest
+      | instrType instr == IAdd && fieldPlace "source" instr == Place Immediate "0" = acc
+      | instrType instr == IAdd3
+      , instrType next == IAdd
+      , fieldPlace "source" instr == Place Register "base_pointer"
+      , placeKind (fieldPlace "offset" instr) == Immediate
+      , placeKind (fieldPlace "source" next) == Immediate
+      , fieldPlace "dest" instr == fieldPlace "dest" next
+      , Just offset <- placeIntegerMaybe (fieldPlace "offset" instr)
+      , Just source <- placeIntegerMaybe (fieldPlace "source" next) =
+          Instr IAdd3 [("source", Place Register "base_pointer"), ("dest", fieldPlace "dest" instr), ("offset", Place Immediate (Text.pack (show (offset + source))))] [] : rest
+      | instrType instr == IJmp
+      , instrType next == ILabel
+      , fieldPlace "target" instr == fieldPlace "target" next =
+          acc
+      | otherwise = instr : acc
+    step instr [] = [instr]
 
 type CopyEnv = Map.Map (PlaceKind, Text) Place
 
@@ -855,149 +920,6 @@ defFieldNames instr =
       | isJumpInstruction ty -> []
       | otherwise -> ["dest"]
 
-peephole :: CodeGenOptions -> [Instr] -> [Instr]
-peephole _ [] = []
-peephole _ instrs =
-  foldr step [] instrs
-  where
-    step c acc@(nc : rest)
-      | instrType c == IMov && fieldPlace "source" c == fieldPlace "dest" c = acc
-      | pureRegisterDefinition c
-      , Just def <- singleDefPlace c
-      , Just nextDef <- singleDefPlace nc
-      , def == nextDef
-      , def `notElem` usePlaces nc =
-          acc
-      | instrType c == ISt && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc =
-          if fieldPlace "source" c == fieldPlace "dest" nc
-            then c : rest
-            else c : Instr IMov [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == IAdd3 && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr ILdOffset [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "offset" c)] [] : rest
-      | instrType c == IMov && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr ILd [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == IAdd && instrType nc == ILd && fieldPlace "dest" c == fieldPlace "source" nc && fieldPlace "dest" nc == fieldPlace "source" nc =
-          Instr ILdOffset [("source", fieldPlace "source" nc), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" c)] [] : rest
-      | instrType c == IMov && instrType nc == IAdd && fieldPlace "dest" c == fieldPlace "dest" nc && isVirtualRegister (fieldPlace "source" c) =
-          Instr IAdd3 [("source", fieldPlace "source" c), ("dest", fieldPlace "dest" nc), ("offset", fieldPlace "source" nc)] [] : rest
-      | instrType c == IMov
-      , instrType nc == IAdd
-      , fieldPlace "dest" c == fieldPlace "dest" nc
-      , placeKind (fieldPlace "source" c) == Immediate
-      , placeKind (fieldPlace "source" nc) == Immediate
-      , Just first <- placeIntegerMaybe (fieldPlace "source" c)
-      , Just second <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr IMov [("source", Place Immediate (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" nc)] [] : rest
-      | instrType c == IAdd && fieldPlace "source" c == Place Immediate "0" = acc
-      | instrType c == IAdd3
-      , instrType nc == IAdd
-      , fieldPlace "source" c == Place Register "base_pointer"
-      , placeKind (fieldPlace "offset" c) == Immediate
-      , placeKind (fieldPlace "source" nc) == Immediate
-      , fieldPlace "dest" c == fieldPlace "dest" nc
-      , Just offset <- placeIntegerMaybe (fieldPlace "offset" c)
-      , Just source <- placeIntegerMaybe (fieldPlace "source" nc) =
-          Instr IAdd3 [("source", Place Register "base_pointer"), ("dest", fieldPlace "dest" c), ("offset", Place Immediate (Text.pack (show (offset + source))))] [] : rest
-      | instrType c == IJmp && instrType nc == ILabel && fieldPlace "target" c == fieldPlace "target" nc = acc
-      | otherwise = c : acc
-    step c [] = [c]
-
-finalizeOptimizedInstructions :: CodeGenOptions -> [Instr] -> [Instr]
-finalizeOptimizedInstructions options = go (8 :: Int)
-  where
-    step = eliminateDeadPhysicalWrites . peephole options . collapseAdjacentLabels
-    go 0 instrs = instrs
-    go fuel instrs =
-      let instrs' = step instrs
-       in if instrs' == instrs then instrs else go (fuel - 1) instrs'
-
-collapseAdjacentLabels :: [Instr] -> [Instr]
-collapseAdjacentLabels instrs =
-  map (rewriteLabelAliases aliases) kept
-  where
-    (aliases, keptRev, _) = foldl' step (Map.empty, [], Nothing) instrs
-    kept = reverse keptRev
-
-    step (aliasMap, out, previousLabel) instr
-      | instrType instr == ILabel =
-          let target = fieldPlace "target" instr
-           in case previousLabel of
-                Just canonical ->
-                  (Map.insert (placeValue target) (placeValue canonical) aliasMap, out, previousLabel)
-                Nothing ->
-                  (aliasMap, instr : out, Just target)
-      | otherwise = (aliasMap, instr : out, Nothing)
-
-rewriteLabelAliases :: Map.Map Text Text -> Instr -> Instr
-rewriteLabelAliases aliases instr =
-  instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
-  where
-    rewritePlaceLabel place
-      | placeKind place == Immediate = place {placeValue = resolveLabelAlias aliases (placeValue place)}
-      | otherwise = place
-
-resolveLabelAlias :: Map.Map Text Text -> Text -> Text
-resolveLabelAlias aliases = go Set.empty
-  where
-    go seen label
-      | label `Set.member` seen = label
-      | Just next <- Map.lookup label aliases = go (Set.insert label seen) next
-      | otherwise = label
-
-eliminateDeadPhysicalWrites :: [Instr] -> [Instr]
-eliminateDeadPhysicalWrites instrs =
-  [instr | (_, instr) <- sortBy compareIndexedInstruction kept]
-  where
-    blocks =
-      sortBlocks $
-        livenessAnalysis $
-          map (buildBlockUseDefWith physicalInstructionUseDef) (buildBasicBlocks instrs)
-    kept = concatMap keepBlock blocks
-
-    keepBlock block =
-      snd $
-        foldr step (blockLiveOut block, []) (blockCode block)
-
-    step indexed@(_, instr) (live, keptInstrs)
-      | purePhysicalDefinition instr
-      , let (_, defs) = physicalInstructionUseDef instr
-      , Set.null (Set.intersection defs live) =
-          (live, keptInstrs)
-      | otherwise =
-          let (uses, defs) = physicalInstructionUseDef instr
-              live' = Set.union uses (Set.difference live defs)
-           in (live', indexed : keptInstrs)
-
-    compareIndexedInstruction (left, _) (right, _) = compare left right
-
-physicalInstructionUseDef :: Instr -> (Set.Set Integer, Set.Set Integer)
-physicalInstructionUseDef instr
-  | instrType instr == IAsm = (allAllocatable, allAllocatable)
-  | otherwise = (regSet (useFieldNames instr), regSet (defFieldNames instr))
-  where
-    allAllocatable = Set.fromList allocatableRegisters
-    regSet names =
-      Set.fromList
-        [ reg
-        | name <- names
-        , Just reg <- [physicalAllocatableRegister (fieldPlace name instr)]
-        ]
-
-purePhysicalDefinition :: Instr -> Bool
-purePhysicalDefinition instr =
-  pureRegisterDefinition instr
-    && case defFieldNames instr of
-      [name] -> isJust (physicalAllocatableRegister (fieldPlace name instr))
-      _ -> False
-
-physicalAllocatableRegister :: Place -> Maybe Integer
-physicalAllocatableRegister place
-  | placeKind place == Register =
-      case placeIntegerMaybe place of
-        Just reg | reg `elem` allocatableRegisters -> Just reg
-        _ -> Nothing
-  | otherwise = Nothing
-
 optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
   removeTrailingDeadWrites . removeTrailingExitLabels . removeReturnRoundTrip . stripTrailingExitJump
@@ -1022,6 +944,22 @@ optimizeMethodTail method =
                   | label <- labelsRev
                   ]
            in map (rewriteLabelAliases aliases) (reverse restRev)
+
+rewriteLabelAliases :: Map.Map Text Text -> Instr -> Instr
+rewriteLabelAliases aliases instr =
+  instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
+  where
+    rewritePlaceLabel place
+      | placeKind place == Immediate = place {placeValue = resolveLabelAlias aliases (placeValue place)}
+      | otherwise = place
+
+resolveLabelAlias :: Map.Map Text Text -> Text -> Text
+resolveLabelAlias aliases = go Set.empty
+  where
+    go seen label
+      | label `Set.member` seen = label
+      | Just next <- Map.lookup label aliases = go (Set.insert label seen) next
+      | otherwise = label
 
 removeReturnRoundTrip :: [Instr] -> [Instr]
 removeReturnRoundTrip instrs =

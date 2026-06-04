@@ -144,8 +144,7 @@ renderGlobalData options globalInfo
 renderGlobalInstructions :: CodeGenOptions -> [Instr] -> Either String String
 renderGlobalInstructions options instructions = do
   (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
-  let lowered = finalizeOptimizedInstructions options allocated
-  concat <$> mapM (renderInstr options 0) lowered
+  concat <$> mapM (renderInstr options 0) (cleanupAllocatedInstructions allocated)
   where
     abstractLowered = map (lowerAbstract options 0) instructions
 
@@ -154,7 +153,7 @@ renderMethod options method = do
   (allocated, _, allocatedLocalSize) <- allocateMethodRegisters sourceLocalSize registerAllocationInput
   let loweredAbstract =
         map (lowerAbstract options allocatedLocalSize) allocated
-      lowered = optimizeMethodTail method (finalizeOptimizedInstructions options loweredAbstract)
+      lowered = optimizeMethodTail method (cleanupAllocatedInstructions loweredAbstract)
       usedRegisters = usedAllocatedRegisters lowered
       savedRegisters
         | methodOutputName method == "main" = []
