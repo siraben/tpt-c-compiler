@@ -383,7 +383,7 @@ seedBlocks blocks phis =
       , ssaBlockPreds = rawBlockPreds block
       , ssaBlockSuccs = rawBlockSuccs block
       , ssaBlockPhis = [SSAPhi base (SSAPlace base Nothing) [] | base <- Map.findWithDefault [] (rawBlockId block) phis]
-      , ssaBlockCode = [(index, SSAInstr (instrType instr) [(name, SSAPlace place Nothing) | (name, place) <- instrFields instr] (instrStringFields instr)) | (index, instr) <- rawBlockCode block]
+      , ssaBlockCode = [(index, ssaInstrFromInstr instr) | (index, instr) <- rawBlockCode block]
       }
   | block <- blocks
   ]
@@ -463,7 +463,7 @@ renameInstruction :: (Place -> Bool) -> RenameState -> SSAInstr -> (SSAInstr, [P
 renameInstruction ssaPlacePredicate state instr =
   (instr {ssaInstrFields = concatMap renameField (ssaInstrFields instr)}, defs, stateAfterDefs)
   where
-    rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
+    rawInstr = ssaInstrBase instr
     useNames = Set.fromList (ssaUseFieldNames rawInstr)
     defNames = Set.fromList (ssaDefFieldNames rawInstr)
     (defPlaces, defs, stateAfterDefs) =
@@ -639,7 +639,7 @@ applySSAReplacements replacements =
       | (name, place) <- ssaInstrFields instr
       ]
       where
-        rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
+        rawInstr = ssaInstrBase instr
         uses = Set.fromList (ssaUseFieldNames rawInstr)
         rewriteField name place
           | name `Set.member` uses || instrFieldIsInputName name = replaceSSAPlace replacements place
@@ -656,13 +656,7 @@ replaceSSAPlace replacements = go Set.empty
         _ -> place
 
 ssaReplacementKey :: SSAPlace -> Maybe SSAPlaceKey
-ssaReplacementKey place
-  | isSSAPlace (ssaPlaceBase place)
-  , Just version <- ssaPlaceVersion place
-  , version > 0 =
-      let (ty, value) = ssaVariableKey (ssaPlaceBase place)
-       in Just (ty, value, version)
-  | otherwise = Nothing
+ssaReplacementKey = ssaKeyWhen isSSAPlace
 
 newtype ComparableSSAPlace = ComparableSSAPlace {comparableSSAPlace :: SSAPlace}
   deriving (Show)
@@ -680,6 +674,14 @@ mapSSABlocks :: (SSABlock -> SSABlock) -> SSAMethod -> SSAMethod
 mapSSABlocks update method =
   method {ssaMethodBlocks = map update (ssaMethodBlocks method)}
 
+ssaInstrFromInstr :: Instr -> SSAInstr
+ssaInstrFromInstr instr =
+  SSAInstr (instrType instr) [(name, SSAPlace place Nothing) | (name, place) <- instrFields instr] (instrStringFields instr)
+
+ssaInstrBase :: SSAInstr -> Instr
+ssaInstrBase instr =
+  Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
+
 ssaDefinedPlaces :: (Place -> Bool) -> Instr -> [Place]
 ssaDefinedPlaces ssaPlacePredicate instr =
   uniquePlaces [place | name <- ssaDefFieldNames instr, let place = fieldPlace name instr, ssaPlacePredicate place]
@@ -693,62 +695,14 @@ ssaUseFieldNames instr =
   case instrType instr of
     ISt
       | isDirectStackPlace (fieldPlace FieldDest instr) -> [FieldSource]
-      | otherwise -> [FieldDest, FieldSource]
-    ILd -> [FieldSource]
-    IPush -> [FieldTarget]
-    IPop -> []
-    ICall -> [FieldTarget]
-    IAdd3 -> [FieldSource, FieldOffset]
-    ILdOffset -> [FieldSource, FieldOffset]
-    ICmp -> [FieldFirst, FieldSecond]
-    IAdd -> useDest
-    ISub -> useDest
-    IMull -> useDest
-    IShl -> useDest
-    IShr -> useDest
-    IShr3 -> [FieldSource, FieldThird]
-    IXor -> useDest
-    IAnd -> useDest
-    IOr -> useDest
-    IAsm -> []
-    IMulh -> [FieldSource, FieldThird]
-    IMull3 -> [FieldSource, FieldThird]
-    ISub3 -> [FieldSource, FieldThird]
-    ty
-      | isJumpInstruction ty -> []
-      | otherwise -> [FieldSource]
-  where
-    useDest = [FieldSource, FieldDest]
+    ty -> instrUseFieldNames ty
 
 ssaDefFieldNames :: Instr -> [InstrFieldName]
 ssaDefFieldNames instr =
   case instrType instr of
     ISt
       | isDirectStackPlace (fieldPlace FieldDest instr) -> [FieldDest]
-      | otherwise -> []
-    ILd -> [FieldDest]
-    IPush -> []
-    IPop -> [FieldTarget]
-    ICall -> []
-    IAdd3 -> [FieldDest]
-    ILdOffset -> [FieldDest]
-    ICmp -> []
-    IAdd -> [FieldDest]
-    ISub -> [FieldDest]
-    IMull -> [FieldDest]
-    IShl -> [FieldDest]
-    IShr -> [FieldDest]
-    IShr3 -> [FieldDest]
-    IXor -> [FieldDest]
-    IAnd -> [FieldDest]
-    IOr -> [FieldDest]
-    IAsm -> []
-    IMulh -> [FieldDest]
-    IMull3 -> [FieldDest]
-    ISub3 -> [FieldDest]
-    ty
-      | isJumpInstruction ty -> []
-      | otherwise -> [FieldDest]
+    ty -> instrDefFieldNames ty
 
 isDirectStackPlace :: Place -> Bool
 isDirectStackPlace place = placeKind place `elem` [Local, Parameter]
@@ -858,8 +812,11 @@ collectSSAPlaceKeys method =
     instrPlaces instr = map snd (ssaInstrFields instr)
 
 ssaPlaceKey :: SSAPlace -> Maybe SSAPlaceKey
-ssaPlaceKey place
-  | isRegisterSSAPlace (ssaPlaceBase place)
+ssaPlaceKey = ssaKeyWhen isRegisterSSAPlace
+
+ssaKeyWhen :: (Place -> Bool) -> SSAPlace -> Maybe SSAPlaceKey
+ssaKeyWhen predicate place
+  | predicate (ssaPlaceBase place)
   , Just version <- ssaPlaceVersion place
   , version > 0 =
       let (ty, value) = ssaVariableKey (ssaPlaceBase place)

@@ -4,7 +4,6 @@ module Tptcc.IRGlobal.Types
   , IRM
   , IRState (..)
   , IRSymbol (..)
-  , Namespace (..)
   , initialState
   ) where
 
@@ -21,13 +20,9 @@ import Tptcc.CType (CType)
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
 import Tptcc.Tac (Place)
 
-data Namespace = Ordinary | Tag
-  deriving stock (Eq, Show)
-
 data IRSymbol = IRSymbol
   { irSymbolType :: CType
   , irSymbolPlace :: Maybe Place
-  , irSymbolPrototype :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -65,5 +60,4 @@ fromDefault symbol =
   IRSymbol
     { irSymbolType = symbolType symbol
     , irSymbolPlace = Nothing
-    , irSymbolPrototype = symbolIsPrototype symbol
     }

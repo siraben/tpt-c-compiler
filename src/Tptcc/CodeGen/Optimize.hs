@@ -159,31 +159,10 @@ rewriteInstructionUses env instr =
     rewriteUse name place
       | name `elem` uses =
           let resolved = resolveEnvPlace env place
-           in if placeKind resolved == Immediate && not (fieldAcceptsImmediate instr name)
+           in if placeKind resolved == Immediate && not (instrAcceptsImmediate (instrType instr) name)
                 then place
                 else resolved
       | otherwise = place
-
-fieldAcceptsImmediate :: Instr -> InstrFieldName -> Bool
-fieldAcceptsImmediate instr name =
-  case instrType instr of
-    IMov -> name == FieldSource
-    ICmp -> False
-    IAdd3 -> name `elem` [FieldSource, FieldOffset]
-    ILdOffset -> name == FieldOffset
-    IMulh -> name == FieldThird
-    IMull3 -> name == FieldThird
-    ISub3 -> name == FieldThird
-    IShr3 -> name == FieldThird
-    IAdd -> name == FieldSource
-    ISub -> name == FieldSource
-    IMull -> name == FieldSource
-    IShl -> name == FieldSource
-    IShr -> name == FieldSource
-    IXor -> name == FieldSource
-    IAnd -> name == FieldSource
-    IOr -> name == FieldSource
-    _ -> False
 
 resolveEnvPlace :: CopyEnv -> Place -> Place
 resolveEnvPlace env = go Set.empty
@@ -379,15 +358,12 @@ addPred ident predId =
   Map.adjust (\block -> block {blockPred = predId : blockPred block}) ident
 
 buildBlockUseDef :: BasicBlock -> BasicBlock
-buildBlockUseDef = buildBlockUseDefWith instructionUseDef
-
-buildBlockUseDefWith :: (Instr -> (Set.Set Integer, Set.Set Integer)) -> BasicBlock -> BasicBlock
-buildBlockUseDefWith useDef block =
+buildBlockUseDef block =
   block {blockUse = uses, blockDef = defs}
   where
     (_, uses, defs) = foldl' step (Set.empty, Set.empty, Set.empty) (map snd (blockCode block))
     step (seenDef, useAcc, defAcc) instr =
-      let (useSet, defSet) = useDef instr
+      let (useSet, defSet) = instructionUseDef instr
           newUses = Set.difference useSet seenDef
           newDefs = Set.difference defSet seenDef
        in (Set.union seenDef newDefs, Set.union useAcc newUses, Set.union defAcc newDefs)
@@ -798,11 +774,7 @@ usedAllocatedRegisters instrs =
 
 allocatedPhysicalRegister :: Place -> Maybe Integer
 allocatedPhysicalRegister place
-  | placeKind place == Register =
-      case placeIntegerMaybe place of
-        Just reg | reg `elem` callerSafeRegisters -> Just reg
-        _ -> Nothing
-  | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
+  | placeKind place `elem` [Register, Temporary, PointerRegister, VirtualRegister] =
       case placeIntegerMaybe place of
         Just reg | reg `elem` callerSafeRegisters -> Just reg
         _ -> Nothing
@@ -851,9 +823,7 @@ rewriteInstrRegisters colours instr =
 rewritePlace :: Map.Map Integer Integer -> Place -> Place
 rewritePlace colours place
   | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
-      case Map.lookup (placeInteger place) colours of
-        Just colour -> registerNumber colour
-        Nothing -> place
+      maybe place registerNumber (Map.lookup (placeInteger place) colours)
   | otherwise = place
 
 instructionUseDef :: Instr -> (Set.Set Integer, Set.Set Integer)
@@ -863,62 +833,10 @@ instructionUseDef instr =
     regSet names = Set.fromList [placeInteger place | name <- names, let place = fieldPlace name instr, isVirtualRegister place]
 
 useFieldNames :: Instr -> [InstrFieldName]
-useFieldNames instr =
-  case instrType instr of
-    ISt -> [FieldDest, FieldSource]
-    ILd -> [FieldSource]
-    IPush -> [FieldTarget]
-    IPop -> []
-    ICall -> [FieldTarget]
-    IAdd3 -> [FieldSource, FieldOffset]
-    ILdOffset -> [FieldSource, FieldOffset]
-    ICmp -> [FieldFirst, FieldSecond]
-    IAdd -> useDest
-    ISub -> useDest
-    IMull -> useDest
-    IShl -> useDest
-    IShr -> useDest
-    IShr3 -> [FieldSource, FieldThird]
-    IXor -> useDest
-    IAnd -> useDest
-    IOr -> useDest
-    IAsm -> []
-    IMulh -> [FieldSource, FieldThird]
-    IMull3 -> [FieldSource, FieldThird]
-    ISub3 -> [FieldSource, FieldThird]
-    ty
-      | isJumpInstruction ty -> []
-      | otherwise -> [FieldSource]
-  where
-    useDest = [FieldSource, FieldDest]
+useFieldNames = instrUseFieldNames . instrType
 
 defFieldNames :: Instr -> [InstrFieldName]
-defFieldNames instr =
-  case instrType instr of
-    ISt -> []
-    ILd -> [FieldDest]
-    IPush -> []
-    IPop -> [FieldTarget]
-    ICall -> []
-    IAdd3 -> [FieldDest]
-    ILdOffset -> [FieldDest]
-    ICmp -> []
-    IAdd -> [FieldDest]
-    ISub -> [FieldDest]
-    IMull -> [FieldDest]
-    IShl -> [FieldDest]
-    IShr -> [FieldDest]
-    IShr3 -> [FieldDest]
-    IXor -> [FieldDest]
-    IAnd -> [FieldDest]
-    IOr -> [FieldDest]
-    IAsm -> []
-    IMulh -> [FieldDest]
-    IMull3 -> [FieldDest]
-    ISub3 -> [FieldDest]
-    ty
-      | isJumpInstruction ty -> []
-      | otherwise -> [FieldDest]
+defFieldNames = instrDefFieldNames . instrType
 
 optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
@@ -986,8 +904,7 @@ isLabelInstruction :: Instr -> Bool
 isLabelInstruction instr = instrType instr == ILabel
 
 pureRegisterDefinition :: Instr -> Bool
-pureRegisterDefinition instr =
-  instrType instr `elem` [IMov, IAdd, ISub, IMull, IShl, IShr, IXor, IAnd, IOr, IAdd3, IShr3, IMulh, IMull3, ISub3]
+pureRegisterDefinition = instrPureRegisterDefinition . instrType
 
 singleDefPlace :: Instr -> Maybe Place
 singleDefPlace instr =
@@ -1000,10 +917,7 @@ usePlaces instr =
   [fieldPlace name instr | name <- useFieldNames instr]
 
 isCallerSafePhysicalRegister :: Place -> Bool
-isCallerSafePhysicalRegister place =
-  case allocatedPhysicalRegister place of
-    Just _ -> True
-    Nothing -> False
+isCallerSafePhysicalRegister = maybe False (const True) . allocatedPhysicalRegister
 
 instrTouchesFrame :: Instr -> Bool
 instrTouchesFrame instr =

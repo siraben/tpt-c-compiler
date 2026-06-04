@@ -65,26 +65,15 @@ emitDeclaration declaration = do
           name = declaratorName declarator
       if isFunctionType declaredTy
         then do
-          emitFunctionSymbol name declaredTy (hasNodeField "block" declaration)
+          emitFunctionSymbol name declaredTy
           maybe (pure ()) (emitFunctionBody name declarator) (fieldNodeMaybe "block" declaration)
         else do
           place <- emitObject storageKind declaredTy (fieldNodeMaybe "initializer" declarator)
-          upsertOrdinary name IRSymbol {irSymbolType = declaredTy, irSymbolPlace = Just place, irSymbolPrototype = False}
+          upsertOrdinary name IRSymbol {irSymbolType = declaredTy, irSymbolPlace = Just place}
 
-emitFunctionSymbol :: Text -> CType -> Bool -> IRM ()
-emitFunctionSymbol name ty hasBlock = do
-  let symbol =
-        IRSymbol
-          { irSymbolType = ty
-          , irSymbolPlace = Just (immediateText ("__tptcc_fn_" <> name))
-          , irSymbolPrototype = not hasBlock
-          }
-  existing <- lookupOrdinary name
-  case existing of
-    Just old | irSymbolPrototype old -> upsertOrdinary name symbol
-    Just _ | not hasBlock -> upsertOrdinary name symbol
-    Just _ -> upsertOrdinary name symbol
-    Nothing -> upsertOrdinary name symbol
+emitFunctionSymbol :: Text -> CType -> IRM ()
+emitFunctionSymbol name ty =
+  upsertOrdinary name IRSymbol {irSymbolType = ty, irSymbolPlace = Just (immediateText ("__tptcc_fn_" <> name))}
 
 emitObject :: Text -> CType -> Maybe Node -> IRM Place
 emitObject storageKind declaredTy initializer =
@@ -205,7 +194,7 @@ resolveStructOrUnion node = do
       let membersWithOffsets = withMemberOffsets isStruct members'
           ty = if isStruct then struct typeName membersWithOffsets else typeName `union` membersWithOffsets
       when (hasNodeField "id" node) $
-        upsertTag typeName IRSymbol {irSymbolType = ty, irSymbolPlace = Nothing, irSymbolPrototype = False}
+        upsertTag typeName IRSymbol {irSymbolType = ty, irSymbolPlace = Nothing}
       pure ty
     Nothing -> irSymbolType <$> requireTag typeName
 
@@ -232,9 +221,8 @@ resolveEnum node = do
           IRSymbol
             { irSymbolType = base "INT"
             , irSymbolPlace = Just (immediateInteger value)
-            , irSymbolPrototype = False
             }
-      upsertTag name IRSymbol {irSymbolType = enum name memberNames, irSymbolPlace = Nothing, irSymbolPrototype = False}
+      upsertTag name IRSymbol {irSymbolType = enum name memberNames, irSymbolPlace = Nothing}
     Nothing -> pure ()
   pure (base "INT")
 

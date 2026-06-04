@@ -22,34 +22,35 @@ field name node =
   maybe (throwMissing "field" name node) pure (lookupField name node)
 
 fieldNode :: Error.Error String :> es => FieldName -> Node -> Eff es Node
-fieldNode name node =
-  case lookupField name node of
-    Just (NodeRef child) -> pure child
-    _ -> throwMissing "node field" name node
+fieldNode = typedField "node field" $ \case
+  NodeRef child -> Just child
+  _ -> Nothing
 
 fieldNodeList :: Error.Error String :> es => FieldName -> Node -> Eff es [Node]
-fieldNodeList name node =
-  case lookupField name node of
-    Just (NodeList children) -> pure children
-    _ -> throwMissing "node list field" name node
+fieldNodeList = typedField "node list field" $ \case
+  NodeList children -> Just children
+  _ -> Nothing
 
 fieldInt :: Error.Error String :> es => FieldName -> Node -> Eff es Integer
-fieldInt name node =
-  case lookupField name node of
-    Just (IntValue value) -> pure value
-    _ -> throwMissing "int field" name node
+fieldInt = typedField "int field" $ \case
+  IntValue value -> Just value
+  _ -> Nothing
 
 fieldInts :: Error.Error String :> es => FieldName -> Node -> Eff es [Integer]
-fieldInts name node =
-  case lookupField name node of
-    Just (IntList values) -> pure values
-    _ -> throwMissing "int list field" name node
+fieldInts = typedField "int list field" $ \case
+  IntList values -> Just values
+  _ -> Nothing
 
 fieldString :: Error.Error String :> es => FieldName -> Node -> Eff es Text
-fieldString name node =
-  case lookupField name node of
-    Just (StringValue value) -> pure value
-    _ -> throwMissing "string field" name node
+fieldString = typedField "string field" $ \case
+  StringValue value -> Just value
+  _ -> Nothing
+
+typedField :: Error.Error String :> es => Text -> (NodeValue -> Maybe a) -> FieldName -> Node -> Eff es a
+typedField label match name node =
+  case lookupField name node >>= match of
+    Just value -> pure value
+    Nothing -> throwMissing label name node
 
 throwMissing :: Error.Error String :> es => Text -> FieldName -> Node -> Eff es a
 throwMissing label name node =

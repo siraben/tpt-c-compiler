@@ -538,27 +538,27 @@ emitTernaryExpression node
 
 emitInclusiveOrExpression :: Node -> TacM Place
 emitInclusiveOrExpression node
-  | nodeIs NodeInclusiveOrExpression node = do
-      firstNode <- childNodeAt 0 (nodeChildren node)
-      firstPlace <- emitInclusiveXorExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveXorExpression IOr
+  | nodeIs NodeInclusiveOrExpression node =
+      emitFlatBitwiseExpression node emitInclusiveXorExpression IOr
   | otherwise = emitInclusiveXorExpression node
 
 emitInclusiveXorExpression :: Node -> TacM Place
 emitInclusiveXorExpression node
-  | nodeIs NodeInclusiveXorExpression node = do
-      firstNode <- childNodeAt 0 (nodeChildren node)
-      firstPlace <- emitInclusiveAndExpression firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitInclusiveAndExpression IXor
+  | nodeIs NodeInclusiveXorExpression node =
+      emitFlatBitwiseExpression node emitInclusiveAndExpression IXor
   | otherwise = emitInclusiveAndExpression node
 
 emitInclusiveAndExpression :: Node -> TacM Place
 emitInclusiveAndExpression node
-  | nodeIs NodeInclusiveAndExpression node = do
-      firstNode <- childNodeAt 0 (nodeChildren node)
-      firstPlace <- emitEqualityValue firstNode >>= loadOperandIntoRegister
-      emitFlatInfix firstPlace (drop 1 (childNodes node)) emitEqualityValue IAnd
+  | nodeIs NodeInclusiveAndExpression node =
+      emitFlatBitwiseExpression node emitEqualityValue IAnd
   | otherwise = emitEqualityValue node
+
+emitFlatBitwiseExpression :: Node -> (Node -> TacM Place) -> InstrType -> TacM Place
+emitFlatBitwiseExpression node emitChild op = do
+  firstNode <- childNodeAt 0 (nodeChildren node)
+  firstPlace <- emitChild firstNode >>= loadOperandIntoRegister
+  emitFlatInfix firstPlace (drop 1 (childNodes node)) emitChild op
 
 emitEqualityValue :: Node -> TacM Place
 emitEqualityValue node
@@ -615,9 +615,7 @@ emitBoolControlFlow node trueLabel falseLabel =
     NodeLogicalOrExpression -> emitLogicalOrControl node trueLabel falseLabel
     _ -> do
       value <- emitBoolRValue node >>= loadOperandIntoReadOnlyRegister
-      emit ICmp [(FieldFirst, value), (FieldSecond, immediateInteger 0)]
-      emit IJe [(FieldTarget, falseLabel)]
-      emit IJmp [(FieldTarget, trueLabel)]
+      emitConditionalResultJump value trueLabel falseLabel
 
 emitLogicalAndControl :: Node -> Place -> Place -> TacM ()
 emitLogicalAndControl node trueLabel falseLabel
@@ -1932,12 +1930,6 @@ operandToPlace operand =
       case textIntegerMaybe name of
         Just number -> numberedPlace kind number
         Nothing -> error ("non-numeric operand for " <> Text.unpack (placeKindCode kind) <> ": " <> Text.unpack name)
-
-operandValueString :: OperandValue -> Text
-operandValueString value =
-  case value of
-    OperandInt number -> Text.pack (show number)
-    OperandName name -> name
 
 returnsValue :: CType -> Bool
 returnsValue ty =

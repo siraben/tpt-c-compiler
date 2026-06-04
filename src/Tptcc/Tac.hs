@@ -12,11 +12,15 @@ module Tptcc.Tac
   , globalPlace
   , immediateInteger
   , immediateText
-  , instrFieldBaseName
   , instrFieldInputName
   , instrFieldIsInputName
   , instrFieldNameText
+  , instrAcceptsImmediate
+  , instrDefFieldNames
+  , instrIsBinary
   , instrMnemonic
+  , instrPureRegisterDefinition
+  , instrUseFieldNames
   , isJumpInstruction
   , isVirtualRegister
   , localPlace
@@ -50,7 +54,7 @@ data Place = Place
   { placeKind :: PlaceKind
   , placeValue :: Text
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Ord, Show)
 
 data PlaceKind
   = Immediate
@@ -75,10 +79,10 @@ immediateText :: Text -> Place
 immediateText = Place Immediate
 
 immediateInteger :: Integer -> Place
-immediateInteger = immediateText . Text.pack . show
+immediateInteger = numericPlace Immediate
 
 registerNumber :: Integer -> Place
-registerNumber = Place Register . Text.pack . show
+registerNumber = numericPlace Register
 
 registerText :: Text -> Place
 registerText value =
@@ -97,34 +101,37 @@ specialRegister reg =
       ReturnAddrReg -> "return_addr_reg"
 
 globalPlace :: Integer -> Place
-globalPlace = Place Global . Text.pack . show
+globalPlace = numericPlace Global
 
 localPlace :: Integer -> Place
-localPlace = Place Local . Text.pack . show
+localPlace = numericPlace Local
 
 parameterPlace :: Integer -> Place
-parameterPlace = Place Parameter . Text.pack . show
+parameterPlace = numericPlace Parameter
 
 temporaryPlace :: Integer -> Place
-temporaryPlace = Place Temporary . Text.pack . show
+temporaryPlace = numericPlace Temporary
 
 pointerRegisterPlace :: Integer -> Place
-pointerRegisterPlace = Place PointerRegister . Text.pack . show
+pointerRegisterPlace = numericPlace PointerRegister
 
 virtualRegisterPlace :: Integer -> Place
-virtualRegisterPlace = Place VirtualRegister . Text.pack . show
+virtualRegisterPlace = numericPlace VirtualRegister
+
+numericPlace :: PlaceKind -> Integer -> Place
+numericPlace kind = Place kind . Text.pack . show
 
 numberedPlace :: PlaceKind -> Integer -> Place
-numberedPlace kind value =
+numberedPlace kind =
   case kind of
-    Immediate -> immediateInteger value
-    Register -> registerNumber value
-    Global -> globalPlace value
-    Local -> localPlace value
-    Parameter -> parameterPlace value
-    Temporary -> temporaryPlace value
-    PointerRegister -> pointerRegisterPlace value
-    VirtualRegister -> virtualRegisterPlace value
+    Immediate -> immediateInteger
+    Register -> registerNumber
+    Global -> globalPlace
+    Local -> localPlace
+    Parameter -> parameterPlace
+    Temporary -> temporaryPlace
+    PointerRegister -> pointerRegisterPlace
+    VirtualRegister -> virtualRegisterPlace
 
 placeKindCode :: PlaceKind -> Text
 placeKindCode kind =
@@ -181,12 +188,6 @@ instrFieldIsInputName name =
   case name of
     FieldDestIn -> True
     _ -> False
-
-instrFieldBaseName :: InstrFieldName -> InstrFieldName
-instrFieldBaseName name =
-  case name of
-    FieldDestIn -> FieldDest
-    _ -> name
 
 data InstrType
   = IAdd
@@ -293,6 +294,93 @@ instrMnemonic instr =
     ISub3 -> "sub3"
     IXor -> "xor"
 
+instrAcceptsImmediate :: InstrType -> InstrFieldName -> Bool
+instrAcceptsImmediate instr name =
+  case instr of
+    IMov -> name == FieldSource
+    ICmp -> False
+    IAdd3 -> name `elem` [FieldSource, FieldOffset]
+    ILdOffset -> name == FieldOffset
+    IMulh -> name == FieldThird
+    IMull3 -> name == FieldThird
+    ISub3 -> name == FieldThird
+    IShr3 -> name == FieldThird
+    IAdd -> name == FieldSource
+    ISub -> name == FieldSource
+    IMull -> name == FieldSource
+    IShl -> name == FieldSource
+    IShr -> name == FieldSource
+    IXor -> name == FieldSource
+    IAnd -> name == FieldSource
+    IOr -> name == FieldSource
+    _ -> False
+
+instrUseFieldNames :: InstrType -> [InstrFieldName]
+instrUseFieldNames instr =
+  case instr of
+    ISt -> [FieldDest, FieldSource]
+    ILd -> [FieldSource]
+    IPush -> [FieldTarget]
+    IPop -> []
+    ICall -> [FieldTarget]
+    IAdd3 -> [FieldSource, FieldOffset]
+    ILdOffset -> [FieldSource, FieldOffset]
+    ICmp -> [FieldFirst, FieldSecond]
+    IAdd -> useDest
+    ISub -> useDest
+    IMull -> useDest
+    IShl -> useDest
+    IShr -> useDest
+    IShr3 -> [FieldSource, FieldThird]
+    IXor -> useDest
+    IAnd -> useDest
+    IOr -> useDest
+    IAsm -> []
+    IMulh -> [FieldSource, FieldThird]
+    IMull3 -> [FieldSource, FieldThird]
+    ISub3 -> [FieldSource, FieldThird]
+    ty
+      | isJumpInstruction ty -> []
+      | otherwise -> [FieldSource]
+  where
+    useDest = [FieldSource, FieldDest]
+
+instrDefFieldNames :: InstrType -> [InstrFieldName]
+instrDefFieldNames instr =
+  case instr of
+    ISt -> []
+    ILd -> [FieldDest]
+    IPush -> []
+    IPop -> [FieldTarget]
+    ICall -> []
+    IAdd3 -> [FieldDest]
+    ILdOffset -> [FieldDest]
+    ICmp -> []
+    IAdd -> [FieldDest]
+    ISub -> [FieldDest]
+    IMull -> [FieldDest]
+    IShl -> [FieldDest]
+    IShr -> [FieldDest]
+    IShr3 -> [FieldDest]
+    IXor -> [FieldDest]
+    IAnd -> [FieldDest]
+    IOr -> [FieldDest]
+    IAsm -> []
+    IMulh -> [FieldDest]
+    IMull3 -> [FieldDest]
+    ISub3 -> [FieldDest]
+    ty
+      | isJumpInstruction ty -> []
+      | otherwise -> [FieldDest]
+
+instrIsBinary :: InstrType -> Bool
+instrIsBinary instr =
+  instr `elem` [IMov, IAdd, ISub, IMull, IShl, IShr, IXor, IAnd, IOr]
+
+instrPureRegisterDefinition :: InstrType -> Bool
+instrPureRegisterDefinition instr =
+  instr `elem` [IMov, IAdd, ISub, IMull, IShl, IShr, IXor, IAnd, IOr, IAdd3, IShr3, IMulh, IMull3, ISub3]
+
 isJumpInstruction :: InstrType -> Bool
 isJumpInstruction instr =
   instr `elem` [IJa, IJae, IJb, IJbe, IJe, IJg, IJge, IJl, IJle, IJmp, IJne]
@@ -331,10 +419,4 @@ uniqueInOrder = go Set.empty
       | otherwise = value : go (Set.insert value seen) rest
 
 uniquePlaces :: [Place] -> [Place]
-uniquePlaces = go Set.empty
-  where
-    key place = (placeKind place, placeValue place)
-    go _ [] = []
-    go seen (place : rest)
-      | key place `Set.member` seen = go seen rest
-      | otherwise = place : go (Set.insert (key place) seen) rest
+uniquePlaces = uniqueInOrder

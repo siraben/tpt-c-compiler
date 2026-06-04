@@ -146,22 +146,23 @@ renderGlobalInstructions options instructions = do
   (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
   concat <$> mapM (renderInstr options 0) (cleanupAllocatedInstructions allocated)
   where
-    abstractLowered = map (lowerAbstract options 0) instructions
+    abstractLowered = map (lowerAbstract 0) instructions
 
 renderMethod :: CodeGenOptions -> MethodOutput -> Either String String
 renderMethod options method = do
   (allocated, _, allocatedLocalSize) <- allocateMethodRegisters sourceLocalSize registerAllocationInput
   let loweredAbstract =
-        map (lowerAbstract options allocatedLocalSize) allocated
+        map (lowerAbstract allocatedLocalSize) allocated
       lowered = optimizeMethodTail method (cleanupAllocatedInstructions loweredAbstract)
+      touchesFrame = any instrTouchesFrame lowered
       usedRegisters = usedAllocatedRegisters lowered
       savedRegisters
         | methodOutputName method == "main" = []
         | otherwise = usedRegisters
       frameLocalSize
-        | not (any instrTouchesFrame lowered) = 0
+        | not touchesFrame = 0
         | otherwise = allocatedLocalSize
-      needsFrame = frameLocalSize > 0 || any instrTouchesFrame lowered
+      needsFrame = frameLocalSize > 0 || touchesFrame
       frameSetup
         | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
         | otherwise = ""
@@ -200,8 +201,8 @@ renderMethod options method = do
         lowerMethodSSA method {methodOutputInstructions = promoteScalarLocals (methodOutputInstructions method)}
     registerAllocationInput = optimizeInstructions ssaInstructions
 
-lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
-lowerAbstract options localSize instr
+lowerAbstract :: Integer -> Instr -> Instr
+lowerAbstract localSize instr
   | instrType instr == IGetAddress =
       case (lookup FieldTarget (instrFields instr), lookup FieldDest (instrFields instr)) of
         (Just target, Just dest) -> emitGetAddress localSize target dest

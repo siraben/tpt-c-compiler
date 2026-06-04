@@ -17,7 +17,6 @@ data OperandValue
 data Operand = Operand
   { operandKind :: PlaceKind
   , operandValue :: OperandValue
-  , operandOffset :: Maybe Operand
   , operandIsStandardFunction :: Bool
   , operandIsVariadic :: Maybe Bool
   }

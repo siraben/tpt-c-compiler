@@ -22,7 +22,7 @@ renderInstruction options localSize instr =
     ILabel -> (<> ":") . placeValue <$> requirePlace FieldTarget instr
     ty
       | isJumpInstruction ty -> (\target -> instrMnemonic ty <> " " <> placeValue target) <$> requirePlace FieldTarget instr
-    ICall -> ("call " <>) . renderCallTarget <$> requirePlace FieldTarget instr
+    ICall -> ("call " <>) . renderImmediateOrReg <$> requirePlace FieldTarget instr
     ISt -> renderBinary FieldSource FieldDest (\source dest -> "st " <> asReg source <> ", " <> asMemory options localSize dest)
     ILd -> renderBinary FieldDest FieldSource (\dest source -> "ld " <> asReg dest <> ", " <> asMemory options localSize source)
     IPush -> ("push " <>) . asReg <$> requirePlace FieldTarget instr
@@ -38,7 +38,7 @@ renderInstruction options localSize instr =
     ISub3 -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "sub " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
     IShr3 -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "shr " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
     ty
-      | isBinaryInstruction ty -> renderBinary FieldDest FieldSource (\dest source -> instrMnemonic ty <> " " <> asReg dest <> ", " <> renderImmediateOrMemory options localSize source)
+      | instrIsBinary ty -> renderBinary FieldDest FieldSource (\dest source -> instrMnemonic ty <> " " <> asReg dest <> ", " <> renderImmediateOrMemory options localSize source)
       | otherwise -> Left ("cannot render pseudo-instruction " <> Text.unpack (instrMnemonic ty))
   where
     renderBinary firstName secondName render = do
@@ -63,15 +63,6 @@ requireString name instr =
   case lookup name (instrStringFields instr) of
     Just value -> pure value
     Nothing -> Left ("missing instruction string field '" <> Text.unpack (instrFieldNameText name) <> "' for " <> Text.unpack (instrMnemonic (instrType instr)))
-
-isBinaryInstruction :: InstrType -> Bool
-isBinaryInstruction instr =
-  instr `elem` [IMov, IAdd, ISub, IMull, IShl, IShr, IXor, IAnd, IOr]
-
-renderCallTarget :: Place -> Text
-renderCallTarget place
-  | placeKind place == Immediate = placeValue place
-  | otherwise = asReg place
 
 renderImmediateOrReg :: Place -> Text
 renderImmediateOrReg place
