@@ -8,7 +8,6 @@ module Tptcc.Tac
   , SpecialRegister (..)
   , TacProgram (..)
   , fieldPlace
-  , fieldString
   , globalPlace
   , immediateInteger
   , immediateText
@@ -184,10 +183,7 @@ instrFieldInputName name =
     _ -> Nothing
 
 instrFieldIsInputName :: InstrFieldName -> Bool
-instrFieldIsInputName name =
-  case name of
-    FieldDestIn -> True
-    _ -> False
+instrFieldIsInputName = (== FieldDestIn)
 
 data InstrType
   = IAdd
@@ -248,10 +244,6 @@ fieldPlace name instr =
   case lookup name (instrFields instr) of
     Just place -> place
     Nothing -> immediateInteger 0
-
-fieldString :: InstrFieldName -> Instr -> Text
-fieldString name instr =
-  fromMaybe "" (lookup name (instrStringFields instr))
 
 instrMnemonic :: InstrType -> Text
 instrMnemonic instr =

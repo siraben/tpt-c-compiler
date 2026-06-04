@@ -1,16 +1,13 @@
 module Tptcc.IRSimpleTac
   ( dumpSimpleTac
   , generateSimpleTac
-  , Instr (..)
-  , MethodOutput (..)
-  , Place
-  , TacProgram (..)
   ) where
 
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import Data.Foldable (for_, toList)
-import Data.Maybe (fromMaybe, isJust)
+import Data.List (unsnoc)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isJust)
 import Data.Sequence ((><), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -26,7 +23,7 @@ import Tptcc.NodeFields.Effectful
 import Tptcc.Operand (Operand (..), OperandValue (..))
 import Tptcc.IRSimpleTac.Types
 import Tptcc.SymbolTable (Symbol (..), defaultSymbols)
-import Tptcc.Tac hiding (fieldString)
+import Tptcc.Tac
 import Tptcc.Token (Token (..))
 
 dumpSimpleTac :: Node -> Either String [String]
@@ -673,7 +670,7 @@ emitComparisonControl jumpFor node trueLabel falseLabel = do
   case groups of
     [] -> emitConditionalResultJump tempPlace trueLabel falseLabel
     _ -> do
-      case splitLast groups of
+      case unsnoc groups of
         Nothing -> throw "malformed comparison expression"
         Just (intermediate, finalGroup) -> do
           lhsTy <- foldComparisonIntermediates jumpFor tempPlace firstTy intermediate
@@ -983,12 +980,8 @@ emitPostfixOps place context (op : rest) = do
             _ <- emitMove (specialRegister ReturnReg) result
             pure (result, emptyPostfixContext)
           else pure (target, emptyPostfixContext)
-      "++" -> do
-        mutated <- emitPostfixMutation place IAdd
-        pure (mutated, emptyPostfixContext)
-      "--" -> do
-        mutated <- emitPostfixMutation place ISub
-        pure (mutated, emptyPostfixContext)
+      "++" -> postfixMutation IAdd
+      "--" -> postfixMutation ISub
       "." -> do
         (memberPlace, memberTy) <- emitMemberAccess place context op
         pure (memberPlace, contextForType memberTy)
@@ -998,6 +991,10 @@ emitPostfixOps place context (op : rest) = do
         pure (memberPlace, contextForType memberTy)
       other -> throw ("simple TAC does not support postfix op: " <> other)
   emitPostfixOps nextPlace nextContext rest
+  where
+    postfixMutation instr = do
+      mutated <- emitPostfixMutation place instr
+      pure (mutated, emptyPostfixContext)
 
 emitMemberAccess :: Place -> PostfixContext -> PostfixOp -> TacM (Place, CType)
 emitMemberAccess place context op = do
@@ -1380,10 +1377,7 @@ inferExpressionType node =
 
 inferLastChild :: Node -> TacM CType
 inferLastChild node =
-  maybe (pure (base "VOID")) inferExpressionType (lastMaybe (childNodes node))
-
-lastMaybe :: [a] -> Maybe a
-lastMaybe = foldl' (\_ value -> Just value) Nothing
+  maybe (pure (base "VOID")) (inferExpressionType . snd) (unsnoc (childNodes node))
 
 inferIdentifierType :: Node -> TacM CType
 inferIdentifierType node = do
@@ -1470,11 +1464,7 @@ callReturnType ty =
 memberAccessType :: CType -> PostfixOp -> CType
 memberAccessType ty op =
   let memberName' = maybe "" identifierValue (postfixNodeValue op)
-      memberTy =
-        case ty of
-          StructType _ members' -> memberType <$> memberByName memberName' members'
-          UnionType _ members' -> memberType <$> memberByName memberName' members'
-          _ -> Nothing
+      memberTy = memberType <$> lookupMemberIn ty memberName'
    in maybe ty decayExpressionType memberTy
 
 postfixNodeValue :: PostfixOp -> Maybe Node
@@ -1842,14 +1832,6 @@ comparisonGroups (ChildToken token : ChildNode rhs : rest) =
   ((tokenName token, rhs) :) <$> comparisonGroups rest
 comparisonGroups _ = throw "malformed comparison expression"
 
-splitLast :: [a] -> Maybe ([a], a)
-splitLast [] = Nothing
-splitLast [value] = Just ([], value)
-splitLast (value : values) =
-  case splitLast values of
-    Just (prefix, finalValue) -> Just (value : prefix, finalValue)
-    Nothing -> Nothing
-
 comparisonJump :: Text -> CType -> CType -> TacM InstrType
 comparisonJump op lhs rhs =
   case op of
@@ -1881,17 +1863,15 @@ compoundOperationType op =
     "^=" -> pure IXor
     "<<=" -> pure IShl
     ">>=" -> pure IShr
-    "/=" -> throw "simple TAC does not support division assignment"
-    "%=" -> throw "simple TAC does not support remainder assignment"
     _ -> throw ("simple TAC does not support assignment op: " <> op)
 
 isLogicalExpression :: Node -> Bool
 isLogicalExpression node =
-  nodeName node
-    `elem` [ "LOGICAL_AND_EXPRESSION"
-           , "LOGICAL_OR_EXPRESSION"
-           , "RELATIONAL_EXPRESSION"
-           , "EQUALITY_EXPRESSION"
+  nodeKind node
+    `elem` [ NodeLogicalAndExpression
+           , NodeLogicalOrExpression
+           , NodeRelationalExpression
+           , NodeEqualityExpression
            ]
 
 defaultPlaces :: [(Text, Place)]
@@ -1901,16 +1881,14 @@ defaultPlaces =
   , Just operand <- [symbolPlace symbol]
   ]
 
-defaultStandardFunctionTargets :: [(Text, Bool)]
-defaultStandardFunctionTargets =
-  [ (placeValue (operandToPlace operand), returnsValue (symbolType symbol))
-  | (_, symbol) <- defaultSymbols
-  , Just operand <- [symbolPlace symbol]
-  , operandIsStandardFunction operand
-  ]
-
 defaultStandardFunctionTargetMap :: Map.Map Text Bool
-defaultStandardFunctionTargetMap = Map.fromList defaultStandardFunctionTargets
+defaultStandardFunctionTargetMap =
+  Map.fromList
+    [ (placeValue (operandToPlace operand), returnsValue (symbolType symbol))
+    | (_, symbol) <- defaultSymbols
+    , Just operand <- [symbolPlace symbol]
+    , operandIsStandardFunction operand
+    ]
 
 methodLabel :: Text -> Text -> Text
 methodLabel method label = "." <> method <> "_" <> label

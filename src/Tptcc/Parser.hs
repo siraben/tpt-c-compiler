@@ -4,6 +4,8 @@ module Tptcc.Parser
 
 import Control.Monad (unless, void, when)
 import Control.Monad.Trans.Class (lift)
+import Control.Applicative ((<|>))
+import Data.Maybe (listToMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1236,11 +1238,3 @@ failAt token message =
       <> show (col (tokenPos token))
       <> " near "
       <> show (Text.unpack (tokenString token))
-
-listToMaybe :: [a] -> Maybe a
-listToMaybe [] = Nothing
-listToMaybe (x : _) = Just x
-
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-Just value <|> _ = Just value
-Nothing <|> other = other

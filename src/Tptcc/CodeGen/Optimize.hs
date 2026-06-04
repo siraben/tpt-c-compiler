@@ -145,10 +145,7 @@ propagateCopiesAndConstants = reverse . snd . foldl' step (Map.empty, [])
 
 instructionStopsPropagation :: Instr -> Bool
 instructionStopsPropagation instr =
-  instrType instr == ILabel
-    || instrType instr == ICall
-    || instrType instr == IAsm
-    || instrType instr == IRet
+  instrType instr `elem` [ILabel, ICall, IAsm, IRet]
     || isJumpInstruction (instrType instr)
 
 rewriteInstructionUses :: CopyEnv -> Instr -> Instr
@@ -225,9 +222,7 @@ eliminateDeadVirtualWrites instrs =
 pureVirtualDefinition :: Instr -> Bool
 pureVirtualDefinition instr =
   pureRegisterDefinition instr
-    && case defFieldNames instr of
-      [name] -> isVirtualRegister (fieldPlace name instr)
-      _ -> False
+    && maybe False isVirtualRegister (singleDefPlace instr)
 
 data BasicBlock = BasicBlock
   { blockId :: Text
@@ -296,35 +291,15 @@ buildBasicBlocks tac = finalBlocks
     step (currentId, blockMap, orderRev, orderLength) (index, instr)
       | instrType instr == ILabel =
           let target = placeValue (fieldPlace FieldTarget instr)
-              blockMap1 = addSucc currentId target blockMap
-              (blockMap2, orderRev2, orderLength2) =
-                if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, orderRev, orderLength)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
+              (blockMap2, orderRev2, orderLength2) = linkTargetBlock currentId target blockMap orderRev orderLength
               blockMap3 = Map.adjust (\b -> b {blockCode = [(index, instr)]}) target blockMap2
            in (target, blockMap3, orderRev2, orderLength2)
-      | instrType instr == IJmp =
-          let target = placeValue (fieldPlace FieldTarget instr)
-              blockMap1 = addSucc currentId target blockMap
-              (blockMap2, orderRev2, orderLength2) =
-                if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, orderRev, orderLength)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
-              blockMap3 = prependCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> Text.pack (show orderLength2)
-              (blockMap4, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [] []) blockMap3 orderRev2 orderLength2
-           in (anonId, blockMap4, orderRev3, orderLength3)
       | isJumpInstruction (instrType instr) =
           let target = placeValue (fieldPlace FieldTarget instr)
-              blockMap1 = addSucc currentId target blockMap
-              (blockMap2, orderRev2, orderLength2) =
-                if Map.member target blockMap1
-                  then (addPred target currentId blockMap1, orderRev, orderLength)
-                  else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
+              (blockMap2, orderRev2, orderLength2) = linkTargetBlock currentId target blockMap orderRev orderLength
               blockMap3 = prependCode currentId (index, instr) blockMap2
-              anonId = "anon_block" <> Text.pack (show orderLength2)
-              blockMap4 = addSucc currentId anonId blockMap3
-              (blockMap5, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [currentId] []) blockMap4 orderRev2 orderLength2
+              fallsThrough = instrType instr /= IJmp
+              (anonId, blockMap5, orderRev3, orderLength3) = insertAnonymousBlock currentId fallsThrough blockMap3 orderRev2 orderLength2
            in (anonId, blockMap5, orderRev3, orderLength3)
       | otherwise =
           (currentId, prependCode currentId (index, instr) blockMap, orderRev, orderLength)
@@ -332,6 +307,25 @@ buildBasicBlocks tac = finalBlocks
     finalBlocksFrom blockMap orderRev = [normalizeBlock (blockMap Map.! ident) | ident <- reverse orderRev]
     finalBlocks = finalBlocksFrom finalMap finalOrderRev
     (_, finalMap, finalOrderRev, _) = foldl' step ("!start", Map.fromList [("!start", emptyBlock "!start" [] [])], ["!start"], 1) (zip [1 ..] tac)
+
+linkTargetBlock :: Text -> Text -> Map.Map Text BasicBlock -> [Text] -> Int -> (Map.Map Text BasicBlock, [Text], Int)
+linkTargetBlock currentId target blockMap orderRev orderLength =
+  let blockMap1 = addSucc currentId target blockMap
+   in if Map.member target blockMap1
+        then (addPred target currentId blockMap1, orderRev, orderLength)
+        else insertBlock (emptyBlock target [currentId] []) blockMap1 orderRev orderLength
+
+insertAnonymousBlock :: Text -> Bool -> Map.Map Text BasicBlock -> [Text] -> Int -> (Text, Map.Map Text BasicBlock, [Text], Int)
+insertAnonymousBlock currentId fallsThrough blockMap orderRev orderLength =
+  let anonId = "anon_block" <> Text.pack (show orderLength)
+      blockMap1
+        | fallsThrough = addSucc currentId anonId blockMap
+        | otherwise = blockMap
+      preds
+        | fallsThrough = [currentId]
+        | otherwise = []
+      (blockMap2, orderRev2, orderLength2) = insertBlock (emptyBlock anonId preds []) blockMap1 orderRev orderLength
+   in (anonId, blockMap2, orderRev2, orderLength2)
 
 normalizeBlock :: BasicBlock -> BasicBlock
 normalizeBlock block =
@@ -569,7 +563,7 @@ enableMoves nodes state =
 
 combineNodes :: Integer -> Integer -> AllocState -> AllocState
 combineNodes kept removed state =
-  foldl' combineAdjacent state4 (Set.toList (adjacentNodes state removed))
+  foldl' combineAdjacent state3 (Set.toList (adjacentNodes state removed))
   where
     state1 =
       state
@@ -593,7 +587,6 @@ combineNodes kept removed state =
             , allocSpillWorklist = Set.insert kept (allocSpillWorklist state2)
             }
         else state2
-    state4 = state3
     combineAdjacent st neighbor =
       decrementDegree neighbor (addEdge kept neighbor st)
 
@@ -725,19 +718,17 @@ addMoveForNodes moveList move@(AllocMove source dest) =
     Map.insertWith Set.union dest (Set.singleton move) moveList
 
 moveSet :: [Instr] -> Set.Set AllocMove
-moveSet =
-  Set.fromList . mapMaybeMove
-  where
-    mapMaybeMove [] = []
-    mapMaybeMove (instr : instrs)
-      | instrType instr == IMov
-      , let source = fieldPlace FieldSource instr
-      , let dest = fieldPlace FieldDest instr
-      , isVirtualRegister source
-      , isVirtualRegister dest
-      , placeInteger source /= placeInteger dest =
-          normalizedMove (placeInteger source) (placeInteger dest) : mapMaybeMove instrs
-      | otherwise = mapMaybeMove instrs
+moveSet instrs =
+  Set.fromList
+    [ normalizedMove (placeInteger source) (placeInteger dest)
+    | instr <- instrs
+    , instrType instr == IMov
+    , let source = fieldPlace FieldSource instr
+    , let dest = fieldPlace FieldDest instr
+    , isVirtualRegister source
+    , isVirtualRegister dest
+    , placeInteger source /= placeInteger dest
+    ]
 
 moveNodes :: Set.Set AllocMove -> Set.Set Integer
 moveNodes moves =
@@ -822,7 +813,7 @@ rewriteInstrRegisters colours instr =
 
 rewritePlace :: Map.Map Integer Integer -> Place -> Place
 rewritePlace colours place
-  | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
+  | isVirtualRegister place =
       maybe place registerNumber (Map.lookup (placeInteger place) colours)
   | otherwise = place
 

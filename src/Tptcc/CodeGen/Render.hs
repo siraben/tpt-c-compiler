@@ -10,11 +10,11 @@ import Tptcc.Tac
 renderInstr :: CodeGenOptions -> Integer -> Instr -> Either String String
 renderInstr options localSize instr = do
   rendered <- renderInstruction options localSize instr
-  pure (Text.unpack (linePrefix (instrType instr) <> rendered <> "\n"))
-
-linePrefix :: InstrType -> Text
-linePrefix ILabel = ""
-linePrefix _ = "\t"
+  pure (Text.unpack (prefix <> rendered <> "\n"))
+  where
+    prefix
+      | instrType instr == ILabel = ""
+      | otherwise = "\t"
 
 renderInstruction :: CodeGenOptions -> Integer -> Instr -> Either String Text
 renderInstruction options localSize instr =

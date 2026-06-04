@@ -143,10 +143,8 @@ renderGlobalData options globalInfo
 
 renderGlobalInstructions :: CodeGenOptions -> [Instr] -> Either String String
 renderGlobalInstructions options instructions = do
-  (allocated, _) <- allocateRegisters (optimizeInstructions abstractLowered)
+  (allocated, _) <- allocateRegisters (optimizeInstructions (map (lowerAbstract 0) instructions))
   concat <$> mapM (renderInstr options 0) (cleanupAllocatedInstructions allocated)
-  where
-    abstractLowered = map (lowerAbstract 0) instructions
 
 renderMethod :: CodeGenOptions -> MethodOutput -> Either String String
 renderMethod options method = do
@@ -162,7 +160,7 @@ renderMethod options method = do
       frameLocalSize
         | not touchesFrame = 0
         | otherwise = allocatedLocalSize
-      needsFrame = frameLocalSize > 0 || touchesFrame
+      needsFrame = touchesFrame
       frameSetup
         | needsFrame = "\tpush base_pointer\n\tmov base_pointer, stack_pointer\n"
         | otherwise = ""
@@ -212,8 +210,7 @@ lowerAbstract localSize instr
 emitGetAddress :: Integer -> Place -> Place -> Instr
 emitGetAddress localSize target dest =
   case placeKind target of
-    Global -> Instr IMov [(FieldSource, target), (FieldDest, dest)] []
+    kind | kind `elem` [Global, PointerRegister] -> Instr IMov [(FieldSource, target), (FieldDest, dest)] []
     Parameter -> Instr IAdd3 [(FieldSource, specialRegister BasePointer), (FieldOffset, immediateInteger (localSize + placeInteger target + 2)), (FieldDest, dest)] []
     Local -> Instr IAdd3 [(FieldSource, specialRegister BasePointer), (FieldOffset, immediateInteger (placeInteger target + 1)), (FieldDest, dest)] []
-    PointerRegister -> Instr IMov [(FieldSource, target), (FieldDest, dest)] []
     _ -> Instr INop [] []

@@ -15,10 +15,8 @@ stripInitialNewline value = value
 substituteStdRegisters :: String -> String
 substituteStdRegisters [] = []
 substituteStdRegisters ('%' : digit : rest)
-  | digit == '1' = "r22" <> substituteStdRegisters rest
-  | digit == '2' = "r23" <> substituteStdRegisters rest
-  | digit == '3' = "r24" <> substituteStdRegisters rest
-  | digit == '4' = "r25" <> substituteStdRegisters rest
+  | Just reg <- lookup digit [('1', "r22"), ('2', "r23"), ('3', "r24"), ('4', "r25")] =
+      reg <> substituteStdRegisters rest
 substituteStdRegisters (char : rest) = char : substituteStdRegisters rest
 
 standardLibraryCode :: Map.Map String String
