@@ -3,26 +3,44 @@ module Tptcc.Tac
   , InstrFieldName (..)
   , InstrType (..)
   , MethodOutput (..)
-  , Place (..)
+  , Place
   , PlaceKind (..)
+  , SpecialRegister (..)
   , TacProgram (..)
   , fieldPlace
   , fieldString
+  , globalPlace
+  , immediateInteger
+  , immediateText
+  , instrFieldBaseName
+  , instrFieldInputName
+  , instrFieldIsInputName
+  , instrFieldNameText
   , instrMnemonic
   , isJumpInstruction
   , isVirtualRegister
+  , localPlace
+  , numberedPlace
+  , parameterPlace
+  , placeKind
   , placeKindCode
+  , placeValue
   , placeInteger
   , placeIntegerMaybe
   , placeKey
+  , pointerRegisterPlace
+  , registerNumber
+  , registerText
   , renderPlace
+  , specialRegister
+  , temporaryPlace
   , textIntegerMaybe
   , uniqueInOrder
   , uniquePlaces
+  , virtualRegisterPlace
   ) where
 
 import Data.Maybe (fromMaybe)
-import Data.String (IsString (..))
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -45,6 +63,69 @@ data PlaceKind
   | VirtualRegister
   deriving stock (Eq, Ord, Show)
 
+data SpecialRegister
+  = ReturnReg
+  | StackPointer
+  | BasePointer
+  | TermReg
+  | ReturnAddrReg
+  deriving stock (Eq, Ord, Show)
+
+immediateText :: Text -> Place
+immediateText = Place Immediate
+
+immediateInteger :: Integer -> Place
+immediateInteger = immediateText . Text.pack . show
+
+registerNumber :: Integer -> Place
+registerNumber = Place Register . Text.pack . show
+
+registerText :: Text -> Place
+registerText value =
+  case Text.stripPrefix "r" value >>= textIntegerMaybe of
+    Just number -> registerNumber number
+    Nothing -> Place Register value
+
+specialRegister :: SpecialRegister -> Place
+specialRegister reg =
+  Place Register $
+    case reg of
+      ReturnReg -> "return_reg"
+      StackPointer -> "stack_pointer"
+      BasePointer -> "base_pointer"
+      TermReg -> "term_reg"
+      ReturnAddrReg -> "return_addr_reg"
+
+globalPlace :: Integer -> Place
+globalPlace = Place Global . Text.pack . show
+
+localPlace :: Integer -> Place
+localPlace = Place Local . Text.pack . show
+
+parameterPlace :: Integer -> Place
+parameterPlace = Place Parameter . Text.pack . show
+
+temporaryPlace :: Integer -> Place
+temporaryPlace = Place Temporary . Text.pack . show
+
+pointerRegisterPlace :: Integer -> Place
+pointerRegisterPlace = Place PointerRegister . Text.pack . show
+
+virtualRegisterPlace :: Integer -> Place
+virtualRegisterPlace = Place VirtualRegister . Text.pack . show
+
+numberedPlace :: PlaceKind -> Integer -> Place
+numberedPlace kind value =
+  case kind of
+    Immediate -> immediateInteger value
+    Register -> registerNumber value
+    Global -> globalPlace value
+    Local -> localPlace value
+    Parameter -> parameterPlace value
+    Temporary -> temporaryPlace value
+    PointerRegister -> pointerRegisterPlace value
+    VirtualRegister -> virtualRegisterPlace value
+
 placeKindCode :: PlaceKind -> Text
 placeKindCode kind =
   case kind of
@@ -64,19 +145,48 @@ data Instr = Instr
   }
   deriving (Eq, Show)
 
-newtype InstrFieldName = InstrFieldName
-  { instrFieldNameText :: Text
-  }
+data InstrFieldName
+  = FieldSource
+  | FieldDest
+  | FieldTarget
+  | FieldOffset
+  | FieldFirst
+  | FieldSecond
+  | FieldThird
+  | FieldAsm
+  | FieldDestIn
   deriving stock (Eq, Ord, Show)
 
-instance IsString InstrFieldName where
-  fromString = InstrFieldName . Text.pack
+instrFieldNameText :: InstrFieldName -> Text
+instrFieldNameText name =
+  case name of
+    FieldSource -> "source"
+    FieldDest -> "dest"
+    FieldTarget -> "target"
+    FieldOffset -> "offset"
+    FieldFirst -> "first"
+    FieldSecond -> "second"
+    FieldThird -> "third"
+    FieldAsm -> "asm"
+    FieldDestIn -> "dest_in"
 
-instance Semigroup InstrFieldName where
-  InstrFieldName left <> InstrFieldName right = InstrFieldName (left <> right)
+instrFieldInputName :: InstrFieldName -> Maybe InstrFieldName
+instrFieldInputName name =
+  case name of
+    FieldDest -> Just FieldDestIn
+    _ -> Nothing
 
-instance Monoid InstrFieldName where
-  mempty = InstrFieldName mempty
+instrFieldIsInputName :: InstrFieldName -> Bool
+instrFieldIsInputName name =
+  case name of
+    FieldDestIn -> True
+    _ -> False
+
+instrFieldBaseName :: InstrFieldName -> InstrFieldName
+instrFieldBaseName name =
+  case name of
+    FieldDestIn -> FieldDest
+    _ -> name
 
 data InstrType
   = IAdd
@@ -136,7 +246,7 @@ fieldPlace :: InstrFieldName -> Instr -> Place
 fieldPlace name instr =
   case lookup name (instrFields instr) of
     Just place -> place
-    Nothing -> Place Immediate "0"
+    Nothing -> immediateInteger 0
 
 fieldString :: InstrFieldName -> Instr -> Text
 fieldString name instr =

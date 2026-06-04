@@ -23,7 +23,7 @@ import Tptcc.NodeFields
 import Tptcc.NodeFields.Effectful
 import Tptcc.IRGlobal.Types
 import Tptcc.SymbolTable (defaultSymbols)
-import Tptcc.Tac (Place (..), PlaceKind (..), placeInteger, placeKindCode)
+import Tptcc.Tac (Place, PlaceKind (..), globalPlace, immediateInteger, immediateText, localPlace, numberedPlace, parameterPlace, placeInteger, placeKind, placeKindCode, placeValue, virtualRegisterPlace)
 import Tptcc.Token (SourcePos (..))
 
 dumpIRGlobals :: Node -> Either String [String]
@@ -76,7 +76,7 @@ emitFunctionSymbol name ty hasBlock = do
   let symbol =
         IRSymbol
           { irSymbolType = ty
-          , irSymbolPlace = Just Place {placeKind = Immediate, placeValue = "__tptcc_fn_" <> name}
+          , irSymbolPlace = Just (immediateText ("__tptcc_fn_" <> name))
           , irSymbolPrototype = not hasBlock
           }
   existing <- lookupOrdinary name
@@ -132,7 +132,7 @@ emitInitializerChildren target children =
     go _ [] _ = pure ()
     go (child : rest) (childTy : childTypes) place = do
       emitStaticInitializer childTy child place
-      go rest childTypes place {placeValue = Text.pack (show (placeInteger place + sizeof childTy))}
+      go rest childTypes (numberedPlace (placeKind place) (placeInteger place + sizeof childTy))
 
 registerStringLiteral :: Node -> Place -> IRM ()
 registerStringLiteral node start = do
@@ -163,17 +163,17 @@ allocateGlobal size = do
   st <- State.get
   let offset = globalOffset st
   State.modify (\s -> s {globalOffset = offset + size})
-  pure Place {placeKind = Global, placeValue = Text.pack (show offset)}
+  pure (globalPlace offset)
 
 allocateStack :: Text -> Integer -> IRM Place
 allocateStack method size = do
   st <- State.get
   let offset = Map.findWithDefault 0 method (methodLocalSizes st)
   State.modify (\s -> s {methodLocalSizes = Map.insert method (offset + size) (methodLocalSizes s)})
-  pure Place {placeKind = Local, placeValue = Text.pack (show offset)}
+  pure (localPlace offset)
 
 allocateVR :: IRM Place
-allocateVR = pure Place {placeKind = VirtualRegister, placeValue = "vr"}
+allocateVR = pure (virtualRegisterPlace 0)
 
 setData :: Integer -> Text -> IRM ()
 setData index value =
@@ -231,7 +231,7 @@ resolveEnum node = do
           (identifierValue memberId)
           IRSymbol
             { irSymbolType = base "INT"
-            , irSymbolPlace = Just Place {placeKind = Immediate, placeValue = Text.pack (show value)}
+            , irSymbolPlace = Just (immediateInteger value)
             , irSymbolPrototype = False
             }
       upsertTag name IRSymbol {irSymbolType = enum name memberNames, irSymbolPlace = Nothing, irSymbolPrototype = False}
@@ -324,7 +324,7 @@ emitParameterPlaces method declarator = do
         place <-
           if isAggregate ty
             then allocateStack method (sizeof ty)
-            else pure Place {placeKind = Parameter, placeValue = Text.pack (show index)}
+            else pure (parameterPlace index)
         appendPlaceEvent paramNode method "PARAM" name ty place
 
 buildParameterWithName :: Node -> IRM (Node, Text, CType)

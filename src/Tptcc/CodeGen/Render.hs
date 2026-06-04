@@ -19,26 +19,26 @@ linePrefix _ = "\t"
 renderInstruction :: CodeGenOptions -> Integer -> Instr -> Either String Text
 renderInstruction options localSize instr =
   case instrType instr of
-    ILabel -> (<> ":") . placeValue <$> requirePlace "target" instr
+    ILabel -> (<> ":") . placeValue <$> requirePlace FieldTarget instr
     ty
-      | isJumpInstruction ty -> (\target -> instrMnemonic ty <> " " <> placeValue target) <$> requirePlace "target" instr
-    ICall -> ("call " <>) . renderCallTarget <$> requirePlace "target" instr
-    ISt -> renderBinary "source" "dest" (\source dest -> "st " <> asReg source <> ", " <> asMemory options localSize dest)
-    ILd -> renderBinary "dest" "source" (\dest source -> "ld " <> asReg dest <> ", " <> asMemory options localSize source)
-    IPush -> ("push " <>) . asReg <$> requirePlace "target" instr
-    IPop -> ("pop " <>) . asReg <$> requirePlace "target" instr
+      | isJumpInstruction ty -> (\target -> instrMnemonic ty <> " " <> placeValue target) <$> requirePlace FieldTarget instr
+    ICall -> ("call " <>) . renderCallTarget <$> requirePlace FieldTarget instr
+    ISt -> renderBinary FieldSource FieldDest (\source dest -> "st " <> asReg source <> ", " <> asMemory options localSize dest)
+    ILd -> renderBinary FieldDest FieldSource (\dest source -> "ld " <> asReg dest <> ", " <> asMemory options localSize source)
+    IPush -> ("push " <>) . asReg <$> requirePlace FieldTarget instr
+    IPop -> ("pop " <>) . asReg <$> requirePlace FieldTarget instr
     IRet -> pure "ret"
-    ICmp -> renderBinary "first" "second" (\first second -> "cmp " <> asReg first <> ", " <> renderImmediateOrReg second)
+    ICmp -> renderBinary FieldFirst FieldSecond (\first second -> "cmp " <> asReg first <> ", " <> renderImmediateOrReg second)
     INop -> pure "nop"
-    IAdd3 -> renderTernary "dest" "source" "offset" (\dest source offset -> "add " <> asReg dest <> ", " <> renderImmediateOrReg source <> ", " <> renderImmediateOrReg offset)
-    ILdOffset -> renderTernary "dest" "source" "offset" (\dest source offset -> "ld " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg offset)
-    IAsm -> requireString "asm" instr
-    IMulh -> renderTernary "dest" "source" "third" (\dest source third -> "mulh " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
-    IMull3 -> renderTernary "dest" "source" "third" (\dest source third -> "mul " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
-    ISub3 -> renderTernary "dest" "source" "third" (\dest source third -> "sub " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
-    IShr3 -> renderTernary "dest" "source" "third" (\dest source third -> "shr " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    IAdd3 -> renderTernary FieldDest FieldSource FieldOffset (\dest source offset -> "add " <> asReg dest <> ", " <> renderImmediateOrReg source <> ", " <> renderImmediateOrReg offset)
+    ILdOffset -> renderTernary FieldDest FieldSource FieldOffset (\dest source offset -> "ld " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg offset)
+    IAsm -> requireString FieldAsm instr
+    IMulh -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "mulh " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    IMull3 -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "mul " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    ISub3 -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "sub " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
+    IShr3 -> renderTernary FieldDest FieldSource FieldThird (\dest source third -> "shr " <> asReg dest <> ", " <> asReg source <> ", " <> renderImmediateOrReg third)
     ty
-      | isBinaryInstruction ty -> renderBinary "dest" "source" (\dest source -> instrMnemonic ty <> " " <> asReg dest <> ", " <> renderImmediateOrMemory options localSize source)
+      | isBinaryInstruction ty -> renderBinary FieldDest FieldSource (\dest source -> instrMnemonic ty <> " " <> asReg dest <> ", " <> renderImmediateOrMemory options localSize source)
       | otherwise -> Left ("cannot render pseudo-instruction " <> Text.unpack (instrMnemonic ty))
   where
     renderBinary firstName secondName render = do

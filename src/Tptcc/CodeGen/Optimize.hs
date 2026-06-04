@@ -29,7 +29,7 @@ promoteScalarLocals instrs =
         [ placeInteger target
         | instr <- instrs
         , instrType instr == IGetAddress
-        , let target = fieldPlace "target" instr
+        , let target = fieldPlace FieldTarget instr
         , placeKind target == Local
         ]
     localSlots =
@@ -43,7 +43,7 @@ promoteScalarLocals instrs =
     firstTemp = 1 + maximum (0 : [placeInteger place | instr <- instrs, (_, place) <- instrFields instr, isVirtualRegister place])
     localRegisters =
       Map.fromList
-        [ (slot, Place Temporary (Text.pack (show (firstTemp + fromIntegral index))))
+        [ (slot, temporaryPlace (firstTemp + fromIntegral index))
         | (index, slot) <- zip [(0 :: Int) ..] (Set.toAscList promotable)
         ]
 
@@ -52,13 +52,13 @@ promoteScalarLocals instrs =
 
     rewriteInstr instr
       | instrType instr == ISt
-      , placeKind (fieldPlace "dest" instr) == Local
-      , Just dest <- promotedLocal (fieldPlace "dest" instr) =
-          Instr IMov [("source", fieldPlace "source" instr), ("dest", dest)] []
+      , placeKind (fieldPlace FieldDest instr) == Local
+      , Just dest <- promotedLocal (fieldPlace FieldDest instr) =
+          Instr IMov [(FieldSource, fieldPlace FieldSource instr), (FieldDest, dest)] []
       | instrType instr == ILd
-      , placeKind (fieldPlace "source" instr) == Local
-      , Just source <- promotedLocal (fieldPlace "source" instr) =
-          Instr IMov [("source", source), ("dest", fieldPlace "dest" instr)] []
+      , placeKind (fieldPlace FieldSource instr) == Local
+      , Just source <- promotedLocal (fieldPlace FieldSource instr) =
+          Instr IMov [(FieldSource, source), (FieldDest, fieldPlace FieldDest instr)] []
       | otherwise = instr
 
 optimizeInstructions :: [Instr] -> [Instr]
@@ -72,7 +72,7 @@ cleanupAllocatedInstructions instrs =
     cleanupPass = foldr step []
 
     step instr acc@(next : rest)
-      | instrType instr == IMov && fieldPlace "source" instr == fieldPlace "dest" instr = acc
+      | instrType instr == IMov && fieldPlace FieldSource instr == fieldPlace FieldDest instr = acc
       | pureRegisterDefinition instr
       , Just def <- singleDefPlace instr
       , Just nextDef <- singleDefPlace next
@@ -81,51 +81,51 @@ cleanupAllocatedInstructions instrs =
           acc
       | instrType instr == ISt
       , instrType next == ILd
-      , fieldPlace "dest" instr == fieldPlace "source" next =
-          if fieldPlace "source" instr == fieldPlace "dest" next
+      , fieldPlace FieldDest instr == fieldPlace FieldSource next =
+          if fieldPlace FieldSource instr == fieldPlace FieldDest next
             then instr : rest
-            else instr : Instr IMov [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next)] [] : rest
+            else instr : Instr IMov [(FieldSource, fieldPlace FieldSource instr), (FieldDest, fieldPlace FieldDest next)] [] : rest
       | instrType instr == IAdd3
       , instrType next == ILd
-      , fieldPlace "dest" instr == fieldPlace "source" next
-      , fieldPlace "dest" next == fieldPlace "source" next =
-          Instr ILdOffset [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "offset" instr)] [] : rest
+      , fieldPlace FieldDest instr == fieldPlace FieldSource next
+      , fieldPlace FieldDest next == fieldPlace FieldSource next =
+          Instr ILdOffset [(FieldSource, fieldPlace FieldSource instr), (FieldDest, fieldPlace FieldDest next), (FieldOffset, fieldPlace FieldOffset instr)] [] : rest
       | instrType instr == IMov
       , instrType next == ILd
-      , fieldPlace "dest" instr == fieldPlace "source" next
-      , fieldPlace "dest" next == fieldPlace "source" next =
-          Instr ILd [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next)] [] : rest
+      , fieldPlace FieldDest instr == fieldPlace FieldSource next
+      , fieldPlace FieldDest next == fieldPlace FieldSource next =
+          Instr ILd [(FieldSource, fieldPlace FieldSource instr), (FieldDest, fieldPlace FieldDest next)] [] : rest
       | instrType instr == IAdd
       , instrType next == ILd
-      , fieldPlace "dest" instr == fieldPlace "source" next
-      , fieldPlace "dest" next == fieldPlace "source" next =
-          Instr ILdOffset [("source", fieldPlace "source" next), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "source" instr)] [] : rest
+      , fieldPlace FieldDest instr == fieldPlace FieldSource next
+      , fieldPlace FieldDest next == fieldPlace FieldSource next =
+          Instr ILdOffset [(FieldSource, fieldPlace FieldSource next), (FieldDest, fieldPlace FieldDest next), (FieldOffset, fieldPlace FieldSource instr)] [] : rest
       | instrType instr == IMov
       , instrType next == IAdd
-      , fieldPlace "dest" instr == fieldPlace "dest" next
-      , isVirtualRegister (fieldPlace "source" instr) =
-          Instr IAdd3 [("source", fieldPlace "source" instr), ("dest", fieldPlace "dest" next), ("offset", fieldPlace "source" next)] [] : rest
+      , fieldPlace FieldDest instr == fieldPlace FieldDest next
+      , isVirtualRegister (fieldPlace FieldSource instr) =
+          Instr IAdd3 [(FieldSource, fieldPlace FieldSource instr), (FieldDest, fieldPlace FieldDest next), (FieldOffset, fieldPlace FieldSource next)] [] : rest
       | instrType instr == IMov
       , instrType next == IAdd
-      , fieldPlace "dest" instr == fieldPlace "dest" next
-      , placeKind (fieldPlace "source" instr) == Immediate
-      , placeKind (fieldPlace "source" next) == Immediate
-      , Just first <- placeIntegerMaybe (fieldPlace "source" instr)
-      , Just second <- placeIntegerMaybe (fieldPlace "source" next) =
-          Instr IMov [("source", Place Immediate (Text.pack (show (first + second)))), ("dest", fieldPlace "dest" next)] [] : rest
-      | instrType instr == IAdd && fieldPlace "source" instr == Place Immediate "0" = acc
+      , fieldPlace FieldDest instr == fieldPlace FieldDest next
+      , placeKind (fieldPlace FieldSource instr) == Immediate
+      , placeKind (fieldPlace FieldSource next) == Immediate
+      , Just first <- placeIntegerMaybe (fieldPlace FieldSource instr)
+      , Just second <- placeIntegerMaybe (fieldPlace FieldSource next) =
+          Instr IMov [(FieldSource, immediateInteger (first + second)), (FieldDest, fieldPlace FieldDest next)] [] : rest
+      | instrType instr == IAdd && fieldPlace FieldSource instr == immediateInteger 0 = acc
       | instrType instr == IAdd3
       , instrType next == IAdd
-      , fieldPlace "source" instr == Place Register "base_pointer"
-      , placeKind (fieldPlace "offset" instr) == Immediate
-      , placeKind (fieldPlace "source" next) == Immediate
-      , fieldPlace "dest" instr == fieldPlace "dest" next
-      , Just offset <- placeIntegerMaybe (fieldPlace "offset" instr)
-      , Just source <- placeIntegerMaybe (fieldPlace "source" next) =
-          Instr IAdd3 [("source", Place Register "base_pointer"), ("dest", fieldPlace "dest" instr), ("offset", Place Immediate (Text.pack (show (offset + source))))] [] : rest
+      , fieldPlace FieldSource instr == specialRegister BasePointer
+      , placeKind (fieldPlace FieldOffset instr) == Immediate
+      , placeKind (fieldPlace FieldSource next) == Immediate
+      , fieldPlace FieldDest instr == fieldPlace FieldDest next
+      , Just offset <- placeIntegerMaybe (fieldPlace FieldOffset instr)
+      , Just source <- placeIntegerMaybe (fieldPlace FieldSource next) =
+          Instr IAdd3 [(FieldSource, specialRegister BasePointer), (FieldDest, fieldPlace FieldDest instr), (FieldOffset, immediateInteger (offset + source))] [] : rest
       | instrType instr == IJmp
       , instrType next == ILabel
-      , fieldPlace "target" instr == fieldPlace "target" next =
+      , fieldPlace FieldTarget instr == fieldPlace FieldTarget next =
           acc
       | otherwise = instr : acc
     step instr [] = [instr]
@@ -167,22 +167,22 @@ rewriteInstructionUses env instr =
 fieldAcceptsImmediate :: Instr -> InstrFieldName -> Bool
 fieldAcceptsImmediate instr name =
   case instrType instr of
-    IMov -> name == "source"
+    IMov -> name == FieldSource
     ICmp -> False
-    IAdd3 -> name `elem` ["source", "offset"]
-    ILdOffset -> name == "offset"
-    IMulh -> name == "third"
-    IMull3 -> name == "third"
-    ISub3 -> name == "third"
-    IShr3 -> name == "third"
-    IAdd -> name == "source"
-    ISub -> name == "source"
-    IMull -> name == "source"
-    IShl -> name == "source"
-    IShr -> name == "source"
-    IXor -> name == "source"
-    IAnd -> name == "source"
-    IOr -> name == "source"
+    IAdd3 -> name `elem` [FieldSource, FieldOffset]
+    ILdOffset -> name == FieldOffset
+    IMulh -> name == FieldThird
+    IMull3 -> name == FieldThird
+    ISub3 -> name == FieldThird
+    IShr3 -> name == FieldThird
+    IAdd -> name == FieldSource
+    ISub -> name == FieldSource
+    IMull -> name == FieldSource
+    IShl -> name == FieldSource
+    IShr -> name == FieldSource
+    IXor -> name == FieldSource
+    IAnd -> name == FieldSource
+    IOr -> name == FieldSource
     _ -> False
 
 resolveEnvPlace :: CopyEnv -> Place -> Place
@@ -206,12 +206,12 @@ definedPlaceKeys instr =
 updateCopyEnv :: CopyEnv -> Instr -> CopyEnv
 updateCopyEnv env instr
   | instrType instr == IMov
-  , Just destKey <- placeKey (fieldPlace "dest" instr)
+  , Just destKey <- placeKey (fieldPlace FieldDest instr)
   , isPropagatablePlace source =
       Map.insert destKey source env
   | otherwise = env
   where
-    source = fieldPlace "source" instr
+    source = fieldPlace FieldSource instr
 
 isPropagatablePlace :: Place -> Bool
 isPropagatablePlace place =
@@ -298,7 +298,7 @@ allocateMethodRegisters nextSpillSlot currentTac =
           used = usedAllocatedRegisters rewritten
        in pure (rewritten, used, nextSpillSlot)
     Left reg ->
-      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (Place Local (Text.pack (show nextSpillSlot))) currentTac)
+      allocateMethodRegisters (nextSpillSlot + 1) (spillVirtualRegister reg (localPlace nextSpillSlot) currentTac)
 
 colourTac :: [Instr] -> Either Integer (Map.Map Integer Integer)
 colourTac tac =
@@ -316,7 +316,7 @@ buildBasicBlocks tac = finalBlocks
   where
     step (currentId, blockMap, orderRev, orderLength) (index, instr)
       | instrType instr == ILabel =
-          let target = placeValue (fieldPlace "target" instr)
+          let target = placeValue (fieldPlace FieldTarget instr)
               blockMap1 = addSucc currentId target blockMap
               (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
@@ -325,7 +325,7 @@ buildBasicBlocks tac = finalBlocks
               blockMap3 = Map.adjust (\b -> b {blockCode = [(index, instr)]}) target blockMap2
            in (target, blockMap3, orderRev2, orderLength2)
       | instrType instr == IJmp =
-          let target = placeValue (fieldPlace "target" instr)
+          let target = placeValue (fieldPlace FieldTarget instr)
               blockMap1 = addSucc currentId target blockMap
               (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
@@ -336,7 +336,7 @@ buildBasicBlocks tac = finalBlocks
               (blockMap4, orderRev3, orderLength3) = insertBlock (emptyBlock anonId [] []) blockMap3 orderRev2 orderLength2
            in (anonId, blockMap4, orderRev3, orderLength3)
       | isJumpInstruction (instrType instr) =
-          let target = placeValue (fieldPlace "target" instr)
+          let target = placeValue (fieldPlace FieldTarget instr)
               blockMap1 = addSucc currentId target blockMap
               (blockMap2, orderRev2, orderLength2) =
                 if Map.member target blockMap1
@@ -755,8 +755,8 @@ moveSet =
     mapMaybeMove [] = []
     mapMaybeMove (instr : instrs)
       | instrType instr == IMov
-      , let source = fieldPlace "source" instr
-      , let dest = fieldPlace "dest" instr
+      , let source = fieldPlace FieldSource instr
+      , let dest = fieldPlace FieldDest instr
       , isVirtualRegister source
       , isVirtualRegister dest
       , placeInteger source /= placeInteger dest =
@@ -782,10 +782,10 @@ callerSafeRegisters :: [Integer]
 callerSafeRegisters = [1 .. 21]
 
 spillScratchA :: Place
-spillScratchA = Place Register "20"
+spillScratchA = registerNumber 20
 
 spillScratchB :: Place
-spillScratchB = Place Register "21"
+spillScratchB = registerNumber 21
 
 usedAllocatedRegisters :: [Instr] -> [Integer]
 usedAllocatedRegisters instrs =
@@ -822,7 +822,7 @@ spillVirtualRegister reg spillSlot =
           useScratch = Map.fromList [(name, scratchForUse index) | (index, (name, _)) <- zip [(0 :: Int) ..] usedFields]
           defScratch = Map.fromList [(name, Map.findWithDefault spillScratchA name useScratch) | (name, _) <- defFields]
           scratchByField = Map.union useScratch defScratch
-          loads = [Instr ILd [("source", spillSlot), ("dest", scratch)] [] | scratch <- uniquePlaces (Map.elems useScratch)]
+          loads = [Instr ILd [(FieldSource, spillSlot), (FieldDest, scratch)] [] | scratch <- uniquePlaces (Map.elems useScratch)]
           rewritten =
             instr
               { instrFields =
@@ -830,7 +830,7 @@ spillVirtualRegister reg spillSlot =
                   | (name, place) <- instrFields instr
                   ]
               }
-          stores = [Instr ISt [("source", scratch), ("dest", spillSlot)] [] | scratch <- uniquePlaces (Map.elems defScratch)]
+          stores = [Instr ISt [(FieldSource, scratch), (FieldDest, spillSlot)] [] | scratch <- uniquePlaces (Map.elems defScratch)]
        in loads <> [rewritten] <> stores
 
     isSpilled place =
@@ -852,7 +852,7 @@ rewritePlace :: Map.Map Integer Integer -> Place -> Place
 rewritePlace colours place
   | placeKind place `elem` [Temporary, PointerRegister, VirtualRegister] =
       case Map.lookup (placeInteger place) colours of
-        Just colour -> Place Register (Text.pack (show colour))
+        Just colour -> registerNumber colour
         Nothing -> place
   | otherwise = place
 
@@ -865,72 +865,72 @@ instructionUseDef instr =
 useFieldNames :: Instr -> [InstrFieldName]
 useFieldNames instr =
   case instrType instr of
-    ISt -> ["dest", "source"]
-    ILd -> ["source"]
-    IPush -> ["target"]
+    ISt -> [FieldDest, FieldSource]
+    ILd -> [FieldSource]
+    IPush -> [FieldTarget]
     IPop -> []
-    ICall -> ["target"]
-    IAdd3 -> ["source", "offset"]
-    ILdOffset -> ["source", "offset"]
-    ICmp -> ["first", "second"]
+    ICall -> [FieldTarget]
+    IAdd3 -> [FieldSource, FieldOffset]
+    ILdOffset -> [FieldSource, FieldOffset]
+    ICmp -> [FieldFirst, FieldSecond]
     IAdd -> useDest
     ISub -> useDest
     IMull -> useDest
     IShl -> useDest
     IShr -> useDest
-    IShr3 -> ["source", "third"]
+    IShr3 -> [FieldSource, FieldThird]
     IXor -> useDest
     IAnd -> useDest
     IOr -> useDest
     IAsm -> []
-    IMulh -> ["source", "third"]
-    IMull3 -> ["source", "third"]
-    ISub3 -> ["source", "third"]
+    IMulh -> [FieldSource, FieldThird]
+    IMull3 -> [FieldSource, FieldThird]
+    ISub3 -> [FieldSource, FieldThird]
     ty
       | isJumpInstruction ty -> []
-      | otherwise -> ["source"]
+      | otherwise -> [FieldSource]
   where
-    useDest = ["source", "dest"]
+    useDest = [FieldSource, FieldDest]
 
 defFieldNames :: Instr -> [InstrFieldName]
 defFieldNames instr =
   case instrType instr of
     ISt -> []
-    ILd -> ["dest"]
+    ILd -> [FieldDest]
     IPush -> []
-    IPop -> ["target"]
+    IPop -> [FieldTarget]
     ICall -> []
-    IAdd3 -> ["dest"]
-    ILdOffset -> ["dest"]
+    IAdd3 -> [FieldDest]
+    ILdOffset -> [FieldDest]
     ICmp -> []
-    IAdd -> ["dest"]
-    ISub -> ["dest"]
-    IMull -> ["dest"]
-    IShl -> ["dest"]
-    IShr -> ["dest"]
-    IShr3 -> ["dest"]
-    IXor -> ["dest"]
-    IAnd -> ["dest"]
-    IOr -> ["dest"]
+    IAdd -> [FieldDest]
+    ISub -> [FieldDest]
+    IMull -> [FieldDest]
+    IShl -> [FieldDest]
+    IShr -> [FieldDest]
+    IShr3 -> [FieldDest]
+    IXor -> [FieldDest]
+    IAnd -> [FieldDest]
+    IOr -> [FieldDest]
     IAsm -> []
-    IMulh -> ["dest"]
-    IMull3 -> ["dest"]
-    ISub3 -> ["dest"]
+    IMulh -> [FieldDest]
+    IMull3 -> [FieldDest]
+    ISub3 -> [FieldDest]
     ty
       | isJumpInstruction ty -> []
-      | otherwise -> ["dest"]
+      | otherwise -> [FieldDest]
 
 optimizeMethodTail :: MethodOutput -> [Instr] -> [Instr]
 optimizeMethodTail method =
   removeTrailingDeadWrites . removeTrailingExitLabels . removeReturnRoundTrip . stripTrailingExitJump
   where
-    exitTarget = Place Immediate (".exit_" <> methodOutputName method)
+    exitTarget = immediateText (".exit_" <> methodOutputName method)
 
     stripTrailingExitJump instrs =
       case reverse instrs of
         instr : rest
           | instrType instr == IJmp
-              && fieldPlace "target" instr == exitTarget ->
+              && fieldPlace FieldTarget instr == exitTarget ->
               reverse rest
         _ -> instrs
 
@@ -940,7 +940,7 @@ optimizeMethodTail method =
         (labelsRev, restRev) ->
           let aliases =
                 Map.fromList
-                  [ (placeValue (fieldPlace "target" label), placeValue exitTarget)
+                  [ (placeValue (fieldPlace FieldTarget label), placeValue exitTarget)
                   | label <- labelsRev
                   ]
            in map (rewriteLabelAliases aliases) (reverse restRev)
@@ -950,7 +950,7 @@ rewriteLabelAliases aliases instr =
   instr {instrFields = [(name, rewritePlaceLabel place) | (name, place) <- instrFields instr]}
   where
     rewritePlaceLabel place
-      | placeKind place == Immediate = place {placeValue = resolveLabelAlias aliases (placeValue place)}
+      | placeKind place == Immediate = immediateText (resolveLabelAlias aliases (placeValue place))
       | otherwise = place
 
 resolveLabelAlias :: Map.Map Text Text -> Text -> Text
@@ -967,9 +967,9 @@ removeReturnRoundTrip instrs =
     restore : save : rest
       | instrType save == IMov
           && instrType restore == IMov
-          && fieldPlace "source" save == Place Register "return_reg"
-          && fieldPlace "dest" save == fieldPlace "source" restore
-          && fieldPlace "dest" restore == Place Register "return_reg" ->
+          && fieldPlace FieldSource save == specialRegister ReturnReg
+          && fieldPlace FieldDest save == fieldPlace FieldSource restore
+          && fieldPlace FieldDest restore == specialRegister ReturnReg ->
           reverse rest
     _ -> instrs
 
@@ -1012,4 +1012,4 @@ instrTouchesFrame instr =
 placeTouchesFrame :: Place -> Bool
 placeTouchesFrame place =
   placeKind place `elem` [Local, Parameter]
-    || place == Place Register "base_pointer"
+    || place == specialRegister BasePointer

@@ -203,7 +203,7 @@ renderMethod options method = do
 lowerAbstract :: CodeGenOptions -> Integer -> Instr -> Instr
 lowerAbstract options localSize instr
   | instrType instr == IGetAddress =
-      case (lookup "target" (instrFields instr), lookup "dest" (instrFields instr)) of
+      case (lookup FieldTarget (instrFields instr), lookup FieldDest (instrFields instr)) of
         (Just target, Just dest) -> emitGetAddress localSize target dest
         _ -> instr
   | otherwise = instr
@@ -211,8 +211,8 @@ lowerAbstract options localSize instr
 emitGetAddress :: Integer -> Place -> Place -> Instr
 emitGetAddress localSize target dest =
   case placeKind target of
-    Global -> Instr IMov [("source", target), ("dest", dest)] []
-    Parameter -> Instr IAdd3 [("source", Place Register "base_pointer"), ("offset", Place Immediate (Text.pack (show (localSize + placeInteger target + 2)))), ("dest", dest)] []
-    Local -> Instr IAdd3 [("source", Place Register "base_pointer"), ("offset", Place Immediate (Text.pack (show (placeInteger target + 1)))), ("dest", dest)] []
-    PointerRegister -> Instr IMov [("source", target), ("dest", dest)] []
+    Global -> Instr IMov [(FieldSource, target), (FieldDest, dest)] []
+    Parameter -> Instr IAdd3 [(FieldSource, specialRegister BasePointer), (FieldOffset, immediateInteger (localSize + placeInteger target + 2)), (FieldDest, dest)] []
+    Local -> Instr IAdd3 [(FieldSource, specialRegister BasePointer), (FieldOffset, immediateInteger (placeInteger target + 1)), (FieldDest, dest)] []
+    PointerRegister -> Instr IMov [(FieldSource, target), (FieldDest, dest)] []
     _ -> Instr INop [] []

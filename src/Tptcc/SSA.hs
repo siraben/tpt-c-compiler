@@ -137,13 +137,13 @@ buildRawBlocks instrs
     indexed = zip [(0 :: Int) ..] instrs
     labelAtIndex =
       Map.fromList
-        [ (index, placeValue (fieldPlace "target" instr))
+        [ (index, placeValue (fieldPlace FieldTarget instr))
         | (index, instr) <- indexed
         , instrType instr == ILabel
         ]
     labelTargets =
       Map.fromList
-        [ (placeValue (fieldPlace "target" instr), index)
+        [ (placeValue (fieldPlace FieldTarget instr), index)
         | (index, instr) <- indexed
         , instrType instr == ILabel
         ]
@@ -191,7 +191,7 @@ buildRawBlocks instrs
 jumpTargetIndices :: Map.Map Text Int -> Instr -> [Int]
 jumpTargetIndices labels instr
   | isJumpInstruction (instrType instr) =
-      maybe [] pure (Map.lookup (placeValue (fieldPlace "target" instr)) labels)
+      maybe [] pure (Map.lookup (placeValue (fieldPlace FieldTarget instr)) labels)
   | otherwise = []
 
 terminatesBlock :: Instr -> Bool
@@ -212,7 +212,7 @@ blockSuccessors labelToBlock fallthrough block =
       _ -> maybe [] pure fallthrough
   where
     targetSuccessor instr =
-      maybe [] pure (Map.lookup (placeValue (fieldPlace "target" instr)) labelToBlock)
+      maybe [] pure (Map.lookup (placeValue (fieldPlace FieldTarget instr)) labelToBlock)
 
 attachPreds :: [RawBlock] -> [RawBlock]
 attachPreds blocks =
@@ -477,7 +477,9 @@ renameInstruction ssaPlacePredicate state instr =
         base = ssaPlaceBase place
     renameField (name, place)
       | ssaPlacePredicate base && name `Set.member` useNames && name `Set.member` defNames =
-          [(name <> "_in", currentSSAPlace base state), (name, Map.findWithDefault place name defPlaces)]
+          case instrFieldInputName name of
+            Just inputName -> [(inputName, currentSSAPlace base state), (name, Map.findWithDefault place name defPlaces)]
+            Nothing -> [(name, Map.findWithDefault place name defPlaces)]
       | ssaPlacePredicate base && name `Set.member` useNames =
           [(name, currentSSAPlace base state)]
       | ssaPlacePredicate base && name `Set.member` defNames =
@@ -607,8 +609,8 @@ copyReplacements method =
     | block <- ssaMethodBlocks method
     , (_, instr) <- ssaBlockCode block
     , ssaInstrType instr == IMov
-    , Just source <- [lookup "source" (ssaInstrFields instr)]
-    , Just dest <- [lookup "dest" (ssaInstrFields instr)]
+    , Just source <- [lookup FieldSource (ssaInstrFields instr)]
+    , Just dest <- [lookup FieldDest (ssaInstrFields instr)]
     , source /= dest
     , Just _ <- [ssaReplacementKey source]
     , Just destKey <- [ssaReplacementKey dest]
@@ -617,7 +619,7 @@ copyReplacements method =
 isRemovedCopy :: Set.Set SSAPlaceKey -> SSAInstr -> Bool
 isRemovedCopy replaced instr =
   ssaInstrType instr == IMov
-    && maybe False (`Set.member` replaced) (lookup "dest" (ssaInstrFields instr) >>= ssaReplacementKey)
+    && maybe False (`Set.member` replaced) (lookup FieldDest (ssaInstrFields instr) >>= ssaReplacementKey)
 
 applySSAReplacements :: Map.Map SSAPlaceKey SSAPlace -> SSAMethod -> SSAMethod
 applySSAReplacements replacements =
@@ -640,7 +642,7 @@ applySSAReplacements replacements =
         rawInstr = Instr (ssaInstrType instr) [(name, ssaPlaceBase place) | (name, place) <- ssaInstrFields instr] (ssaInstrStringFields instr)
         uses = Set.fromList (ssaUseFieldNames rawInstr)
         rewriteField name place
-          | name `Set.member` uses || "_in" `Text.isSuffixOf` instrFieldNameText name = replaceSSAPlace replacements place
+          | name `Set.member` uses || instrFieldIsInputName name = replaceSSAPlace replacements place
           | otherwise = place
 
 replaceSSAPlace :: Map.Map SSAPlaceKey SSAPlace -> SSAPlace -> SSAPlace
@@ -690,63 +692,63 @@ ssaUseFieldNames :: Instr -> [InstrFieldName]
 ssaUseFieldNames instr =
   case instrType instr of
     ISt
-      | isDirectStackPlace (fieldPlace "dest" instr) -> ["source"]
-      | otherwise -> ["dest", "source"]
-    ILd -> ["source"]
-    IPush -> ["target"]
+      | isDirectStackPlace (fieldPlace FieldDest instr) -> [FieldSource]
+      | otherwise -> [FieldDest, FieldSource]
+    ILd -> [FieldSource]
+    IPush -> [FieldTarget]
     IPop -> []
-    ICall -> ["target"]
-    IAdd3 -> ["source", "offset"]
-    ILdOffset -> ["source", "offset"]
-    ICmp -> ["first", "second"]
+    ICall -> [FieldTarget]
+    IAdd3 -> [FieldSource, FieldOffset]
+    ILdOffset -> [FieldSource, FieldOffset]
+    ICmp -> [FieldFirst, FieldSecond]
     IAdd -> useDest
     ISub -> useDest
     IMull -> useDest
     IShl -> useDest
     IShr -> useDest
-    IShr3 -> ["source", "third"]
+    IShr3 -> [FieldSource, FieldThird]
     IXor -> useDest
     IAnd -> useDest
     IOr -> useDest
     IAsm -> []
-    IMulh -> ["source", "third"]
-    IMull3 -> ["source", "third"]
-    ISub3 -> ["source", "third"]
+    IMulh -> [FieldSource, FieldThird]
+    IMull3 -> [FieldSource, FieldThird]
+    ISub3 -> [FieldSource, FieldThird]
     ty
       | isJumpInstruction ty -> []
-      | otherwise -> ["source"]
+      | otherwise -> [FieldSource]
   where
-    useDest = ["source", "dest"]
+    useDest = [FieldSource, FieldDest]
 
 ssaDefFieldNames :: Instr -> [InstrFieldName]
 ssaDefFieldNames instr =
   case instrType instr of
     ISt
-      | isDirectStackPlace (fieldPlace "dest" instr) -> ["dest"]
+      | isDirectStackPlace (fieldPlace FieldDest instr) -> [FieldDest]
       | otherwise -> []
-    ILd -> ["dest"]
+    ILd -> [FieldDest]
     IPush -> []
-    IPop -> ["target"]
+    IPop -> [FieldTarget]
     ICall -> []
-    IAdd3 -> ["dest"]
-    ILdOffset -> ["dest"]
+    IAdd3 -> [FieldDest]
+    ILdOffset -> [FieldDest]
     ICmp -> []
-    IAdd -> ["dest"]
-    ISub -> ["dest"]
-    IMull -> ["dest"]
-    IShl -> ["dest"]
-    IShr -> ["dest"]
-    IShr3 -> ["dest"]
-    IXor -> ["dest"]
-    IAnd -> ["dest"]
-    IOr -> ["dest"]
+    IAdd -> [FieldDest]
+    ISub -> [FieldDest]
+    IMull -> [FieldDest]
+    IShl -> [FieldDest]
+    IShr -> [FieldDest]
+    IShr3 -> [FieldDest]
+    IXor -> [FieldDest]
+    IAnd -> [FieldDest]
+    IOr -> [FieldDest]
     IAsm -> []
-    IMulh -> ["dest"]
-    IMull3 -> ["dest"]
-    ISub3 -> ["dest"]
+    IMulh -> [FieldDest]
+    IMull3 -> [FieldDest]
+    ISub3 -> [FieldDest]
     ty
       | isJumpInstruction ty -> []
-      | otherwise -> ["dest"]
+      | otherwise -> [FieldDest]
 
 isDirectStackPlace :: Place -> Bool
 isDirectStackPlace place = placeKind place `elem` [Local, Parameter]
@@ -774,23 +776,23 @@ lowerSSAMethod method =
 
     labelForBlock block
       | ssaBlockId block == "entry" = []
-      | otherwise = [Instr ILabel [("target", Place Immediate (ssaBlockId block))] []]
+      | otherwise = [Instr ILabel [(FieldTarget, immediateText (ssaBlockId block))] []]
 
     lowerBlockCode block copiesFromBlock =
       case reverse loweredCode of
         terminal : restRev
           | instrType terminal == IJmp ->
-              let target = placeValue (fieldPlace "target" terminal)
+              let target = placeValue (fieldPlace FieldTarget terminal)
                   copies = copiesFor target
                in reverse restRev <> copies <> [terminal]
           | isJumpInstruction (instrType terminal) ->
-              let target = placeValue (fieldPlace "target" terminal)
+              let target = placeValue (fieldPlace FieldTarget terminal)
                   fallthroughs = [succId | succId <- ssaBlockSuccs block, succId `Set.notMember` Set.singleton target]
                   fallthrough = listToMaybe fallthroughs
                   (terminal', targetSplits) = splitConditionalTarget terminal target (copiesFor target)
                   fallthroughJump =
                     case fallthrough of
-                      Just succId -> [Instr IJmp [("target", Place Immediate (splitOrOriginalTarget succId (copiesFor succId)))] []]
+                      Just succId -> [Instr IJmp [(FieldTarget, immediateText (splitOrOriginalTarget succId (copiesFor succId)))] []]
                       Nothing -> []
                   fallthroughSplits =
                     case fallthrough of
@@ -813,9 +815,9 @@ lowerSSAMethod method =
         splitBlock succId copies
           | null copies = []
           | otherwise =
-              [Instr ILabel [("target", Place Immediate (splitLabel succId))] []]
+              [Instr ILabel [(FieldTarget, immediateText (splitLabel succId))] []]
                 <> copies
-                <> [Instr IJmp [("target", Place Immediate succId)] []]
+                <> [Instr IJmp [(FieldTarget, immediateText succId)] []]
         splitConditionalTarget terminal target copies
           | null copies = (terminal, [])
           | otherwise =
@@ -826,8 +828,8 @@ lowerSSAMethod method =
     rewriteTarget target =
       map
         ( \(name, place) ->
-            if name == "target"
-              then (name, Place Immediate target)
+            if name == FieldTarget
+              then (name, immediateText target)
               else (name, place)
         )
 
@@ -839,7 +841,7 @@ ssaPlaceMap method =
     firstFresh :: Integer
     firstFresh = maximum (0 : [number | (_, value, _) <- keys, Just number <- [textIntegerMaybe value]]) + 1
     freshPlaces =
-      [ Place ty (Text.pack (show (firstFresh + fromIntegral index)))
+      [ numberedPlace ty (firstFresh + fromIntegral index)
       | (index, (ty, _, _)) <- zip [(0 :: Int) ..] keys
       ]
 
@@ -876,7 +878,7 @@ lowerSSAPlace placeMap place =
     Nothing
       | isRegisterSSAPlace (ssaPlaceBase place)
       , ssaPlaceVersion place == Just 0 ->
-          Place Immediate "0"
+          immediateInteger 0
       | otherwise -> ssaPlaceBase place
 
 ssaEdgeCopies :: Map.Map SSAPlaceKey Place -> SSAMethod -> EdgeCopies
@@ -891,7 +893,7 @@ ssaEdgeCopies placeMap method =
             let dest = lowerSSAPlace placeMap (ssaPhiDest phi)
                 source' = lowerSSAPlace placeMap source
                 copy =
-                  [Instr IMov [("source", source'), ("dest", dest)] [] | source' /= dest]
+                  [Instr IMov [(FieldSource, source'), (FieldDest, dest)] [] | source' /= dest]
              in Map.insertWith (Map.unionWith (<>)) predId (Map.singleton succId copy) inner
         )
         acc
@@ -904,15 +906,15 @@ lowerSSAInstr placeMap instr =
     baseFields =
       [ (name, lowerSSAPlace placeMap place)
       | (name, place) <- ssaInstrFields instr
-      , not ("_in" `Text.isSuffixOf` instrFieldNameText name)
+      , not (instrFieldIsInputName name)
       ]
     loweredFields = baseFields
     prefix =
-      case (lookup "dest_in" (ssaInstrFields instr), lookup "dest" (ssaInstrFields instr)) of
+      case (lookup FieldDestIn (ssaInstrFields instr), lookup FieldDest (ssaInstrFields instr)) of
         (Just source, Just dest) ->
           let source' = lowerSSAPlace placeMap source
               dest' = lowerSSAPlace placeMap dest
-           in [Instr IMov [("source", source'), ("dest", dest')] [] | source' /= dest']
+           in [Instr IMov [(FieldSource, source'), (FieldDest, dest')] [] | source' /= dest']
         _ -> []
 
 sanitizeBlockId :: Text -> Text
