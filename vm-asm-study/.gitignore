@@ -1,0 +1,12 @@
+# Source-only distribution. Keep local builds and investigation evidence private.
+/*
+!/.gitignore
+!/README.md
+!/runtime.asm
+!/build_asm.py
+!/test.py
+!/bootstrap/
+!/tests/
+/bootstrap/methodically.hs
+**/__pycache__/
+*.pyc
